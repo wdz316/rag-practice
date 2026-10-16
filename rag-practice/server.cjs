@@ -38,27 +38,7 @@ const POOLS = {
   },
   moutai: {
     name: 'moutai·茅台年报', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
-    chunkRule: '6切分方法可切（正文）+ 269张表共享（行拆池另见moutai2012）',
-    methods: true,
-    load(method = 'fixed500') {
-      // 正文按切分方法 + 269张整表共享（从v1切片，零重算，保证表题可答）
-      const texts = JSON.parse(fs.readFileSync(path.join(PDFD, `chunks_moutai_${method}.json`), 'utf-8'))
-        .map((c) => ({ title: '茅台年报', context: c.context, _id: c.title, parent: c.parent }));
-      const tvecs = JSON.parse(fs.readFileSync(path.join(PDFD, `emb_moutai_${method}.json`), 'utf-8'));
-      const v1chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-      const v1vecs = JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings.json'), 'utf-8'));
-      const tables = [], tvec = [];
-      v1chunks.forEach((c, i) => {
-        if (c.chunk_type === 'table') { tables.push({ title: c.chunk_id, context: c.text }); tvec.push(v1vecs[i]); }
-      });
-      let parents = null;
-      if (method === 'child') parents = JSON.parse(fs.readFileSync(path.join(PDFD, 'parents_moutai_child.json'), 'utf-8'));
-      return { chunks: [...texts, ...tables], vecs: [...tvecs, ...tvec], parents };
-    },
-  },
-  moutai2012: {
-    name: 'moutai2012·行拆旧池', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
-    chunkRule: '表>10行按行拆+首行贴头，文500字滑窗100重叠，共2012块（保留对照）',
+    chunkRule: '表>10行按行拆+首行贴头，文500字滑窗100重叠，共2012块',
     load() {
       const chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks_v2.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
         const c = JSON.parse(l);
