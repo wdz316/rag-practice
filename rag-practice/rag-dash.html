@@ -39,6 +39,7 @@
   <p><label>距离算法：</label><select id="metric"><option value="cosine">余弦</option><option value="euclid">欧氏</option></select> <span class="qp" data-k="metric">?</span></p>
   <p><button id="run">运行检索（自动记入对比表）</button> <span id="log"></span></p>
   <div id="sum" style="font-size:13px;color:#666"></div>
+  <div id="warn" style="font-size:14px;color:red;font-weight:bold"></div>
   <table id="res"><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>向量分</th><th>关键词分</th><th>字数/token(预估)</th><th>片段</th></tr></thead><tbody></tbody></table>
 </div>
 
@@ -138,6 +139,11 @@ $('run').onclick = async () => {
   if (!r.ok) { $('log').textContent = res.error || '出错'; return; }
   $('log').textContent = `${res.poolName}${res.method && res.method !== '-' ? '/' + res.method : ''} ${res.poolSize}块，${res.ms}ms，Top${res.topK}共${res.totalTokens}token(预估)`;
   $('sum').textContent = `本轮合计约${res.totalTokens}token（喂给大模型就是这些，越少越省钱）。`;
+  // 置信门槛：Top1绝对向量分<0.55亮红灯（混合分是归一化逼出来的，不能信）
+  const raw = res.top[0].sv;
+  $('warn').textContent = raw < 0.55
+    ? `⚠ Top1绝对相似度仅${raw}（低于0.55置信线）：很可能题库不对——比如拿茅台题考百科库。建议切换库或换问法，不要信这份答案。`
+    : '';
   document.querySelector('#res tbody').innerHTML = res.top.map((h, i) =>
     `<tr><td>Top${i + 1}</td><td>《${h.title}》${h.via ? '（由子块 ' + h.via.split('#')[1] + ' 命中返父）' : ''}</td><td>${h.score}</td><td>${h.sv}</td><td>${h.sk}</td><td>${h.chars}字/${h.tokens}</td><td>${h.snippet}…</td></tr>`).join('');
   loadHist();
