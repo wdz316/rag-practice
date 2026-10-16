@@ -20,7 +20,7 @@
 TopK <input type="range" id="topK" min="1" max="10" value="5" style="width:120px"> <b id="topKv">5</b>
 alpha <input type="range" id="alpha" min="0" max="1" step="0.1" value="0.7" style="width:120px"> <b id="alphaV">0.7</b>
 <button id="run">运行检索</button> <span id="log"></span></p>
-<table><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>片段</th></tr></thead><tbody id="res"></tbody></table>
+<table><thead><tr><th>排名</th><th>标题</th><th>混合分(相对)</th><th>向量分(绝对)</th><th>片段</th></tr></thead><tbody id="res"></tbody></table>
 
 <script type="module">
 import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
@@ -70,10 +70,10 @@ $('run').onclick = async () => {
     const norm = (arr) => { const mn = Math.min(...arr), mx = Math.max(...arr); return arr.map((v) => (mx === mn ? 0 : (v - mn) / (mx - mn))); };
     const nk = norm(ks), nv = norm(vs);
     const alpha = +$('alpha').value, k = +$('topK').value;
-    const top = chunks.map((c, i) => ({ t: c.title.split('#')[0], s: alpha * nv[i] + (1 - alpha) * nk[i], snippet: c.context.slice(0, 100) }))
+    const top = chunks.map((c, i) => ({ t: c.title.split('#')[0], s: alpha * nv[i] + (1 - alpha) * nk[i], sv: vs[i], snippet: c.context.slice(0, 100) }))
       .sort((a, b) => b.s - a.s).slice(0, k);
     document.getElementById('res').innerHTML = top.map((h, i) =>
-      `<tr><td>Top${i + 1}</td><td>《${h.t}》</td><td>${h.s.toFixed(3)}</td><td>${h.snippet}…</td></tr>`).join('');
+      `<tr><td>Top${i + 1}</td><td>《${h.t}》</td><td>${h.s.toFixed(3)}</td><td>${h.sv.toFixed(3)}</td><td>${h.snippet}…</td></tr>`).join('');
     $('log').textContent = `256块，${Date.now() - t0}ms（向量在浏览器里算的）`;
   } catch (e) { $('log').textContent = '出错：' + e.message; }
 };
