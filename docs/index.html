@@ -3,156 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RAG仪表盘 · 在线演示版（trial最小库）</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<title>RAG 练手项目说明 · 从切块到问答全链路</title>
 <style>
-  body { font-family: sans-serif; background: #fff; color: #222; max-width: 960px; margin: 0 auto; padding: 16px; }
+  body { font-family: sans-serif; background: #fff; color: #222; max-width: 860px; margin: 0 auto; padding: 16px; line-height: 1.8; }
   h2 { border-bottom: 2px solid #222; padding-bottom: 4px; }
-  .panel { border: 1px solid #ccc; padding: 12px; margin-bottom: 16px; }
-  label { display: inline-block; width: 110px; }
-  input[type=text] { width: 400px; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
   th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
   th { background: #f2f2f2; }
-  .up { color: green; font-weight: bold; } .down { color: red; font-weight: bold; } .flat { color: gray; }
-  #log { color: #666; font-size: 13px; }
-  .qp { display: inline-block; width: 16px; height: 16px; border: 1px solid #888; border-radius: 50%; text-align: center; font-size: 12px; cursor: pointer; color: #666; }
-  #tip { display: none; position: fixed; z-index: 99; border: 1px solid #888; background: #ffffe8; padding: 8px; font-size: 13px; max-width: 320px; }
-  .step { width: 24px; }
+  .cta { display: inline-block; background: #222; color: #fff; padding: 10px 28px; text-decoration: none; font-size: 17px; margin: 12px 0; }
 </style>
 </head>
 <body>
-<h2>① 参数（上面调）</h2>
-<div class="panel">
-  <div id="tip"></div>
-  <p style="font-size:13px;color:#666">在线演示版：库固定为 trial·中文百科256块（按自然段）。完整版（三池六刀法）在本机仪表盘。首次运行需下载约100MB向量模型到浏览器缓存（一次）。</p>
-  <p><label>问题：</label><input type="text" id="q" value="生命数耗完即算为什么？" placeholder="先输入问题"> <span class="qp" data-k="q">?</span></p>
-  <p><label>TopK：</label><button class="step" id="topKm">−</button><input type="range" id="topK" min="1" max="10" value="5"><button class="step" id="topKp">+</button> <b id="topKv">5</b> <span class="qp" data-k="topK">?</span></p>
-  <p><label>alpha：</label><button class="step" id="alphaM">−</button><input type="range" id="alpha" min="0" max="1" step="0.1" value="0.7"><button class="step" id="alphaP">+</button> <b id="alphaV">0.7</b> <span class="qp" data-k="alpha">?</span></p>
-  <p><button id="run">运行检索（自动记入对比表）</button> <span id="log"></span></p>
-</div>
+<h1>RAG 练手项目：从切块到问答，一个能点的全链路</h1>
+<p><a class="cta" href="./demo.html">👉 去演示页动手玩</a></p>
 
-<h2>② 本轮结果（下面出）</h2>
-<div class="panel">
-  <div id="sum" style="font-size:13px;color:#666"></div>
-  <div id="warn" style="font-size:14px;color:red;font-weight:bold"></div>
-  <table><thead><tr><th>排名</th><th>标题</th><th>混合分(相对)</th><th>向量分(绝对)</th><th>关键词分</th><th>片段</th></tr></thead><tbody id="res"></tbody></table>
-</div>
+<h2>一、RAG 是什么（30 秒）</h2>
+<p>大模型不会背你们公司的私域资料。RAG 的做法是：<b>用户提问时，先去文档库里找出最相关的几段原文，再把原文和问题一起交给大模型，让它照着原文回答</b>。好比开卷考试：书（文档库）+ 找书（检索）+ 照书写答案（生成）。</p>
 
-<h2>③ 历史对比表（存在本浏览器，最新在上）</h2>
-<div class="panel">
-  <p><button id="clearHist">清空历史</button></p>
-  <canvas id="hist1" height="80"></canvas>
-  <div style="font-size:13px;color:#666">图一：Top1原始向量分走势（左新右旧）</div>
-  <table id="runs"><thead><tr><th>时间</th><th>问题</th><th>TopK</th><th>alpha</th><th>Top1</th><th>Top1原始分</th><th>耗时</th></tr></thead><tbody></tbody></table>
-</div>
+<h2>二、这里有什么（三个库）</h2>
+<table>
+<tr><th>库</th><th>内容</th><th>练什么</th></tr>
+<tr><td>中文百科 256 块</td><td>维基词条问答（本演示页，浏览器里跑）</td><td>检索、调参、切分方法对比</td></tr>
+<tr><td>茅台年报 2012 块</td><td>143 页真实年报：表格+正文（本机仪表盘）</td><td>脏 PDF 解析、表格行拆、口径裁决</td></tr>
+<tr><td>英文财报 1634 块</td><td>财报表文混合问答（本机仪表盘）</td><td>跨形态检索、计算题生成</td></tr>
+</table>
 
-<script type="module">
-import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
-const $ = (id) => document.getElementById(id);
-const TIPS = {
-  q: '空问题会被拦截，不出结果。口语化提问考向量，原词原文考关键词。',
-  topK: 'TopK=返回前K个最相关的块，好比给模型看K页纸。K小易漏，K大又贵又吵，常用5。−/+每次调1格。',
-  alpha: 'alpha=向量与关键词的权重。1=只用向量，好比只认意思不认字；0=只用关键词，好比只认字不认意思；0.7=两者混合。−/+每次调0.1。',
-};
-const tip = $('tip');
-document.querySelectorAll('.qp').forEach((el) => {
-  const show = (e) => { tip.style.display = 'block'; tip.textContent = TIPS[el.dataset.k]; move(e); };
-  const move = (e) => { tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; };
-  el.addEventListener('mouseenter', show);
-  el.addEventListener('mousemove', move);
-  el.addEventListener('mouseleave', () => tip.style.display = 'none');
-  el.addEventListener('click', show);
-});
-const step = (id, dispId, d, min, max) => {
-  const el = $(id);
-  el.value = Math.min(max, Math.max(min, +( +el.value + d).toFixed(1)));
-  $(dispId).textContent = el.value;
-};
-$('topKm').onclick = () => step('topK', 'topKv', -1, 1, 10);
-$('topKp').onclick = () => step('topK', 'topKv', 1, 1, 10);
-$('alphaM').onclick = () => step('alpha', 'alphaV', -0.1, 0, 1);
-$('alphaP').onclick = () => step('alpha', 'alphaV', 0.1, 0, 1);
-$('topK').oninput = (e) => $('topKv').textContent = e.target.value;
-$('alpha').oninput = (e) => $('alphaV').textContent = e.target.value;
-let chunks = null, vecs = null, ex = null, chart2 = null;
-const HKEY = 'rag_demo_hist_v1';
-const getHist = () => { try { return JSON.parse(localStorage.getItem(HKEY) || '[]'); } catch { return []; } };
+<h2>三、玩法三步</h2>
+<p><b>1. 输问题</b>：比如“生命数耗完即算为什么”。口语化提问考向量，原词原文考关键词。<br>
+<b>2. 调参数</b>：TopK=给模型看几页（常用 5）；alpha=向量与关键词的权重，好比两条腿走路，1 只认意思，0 只认字，0.7 混合。<br>
+<b>3. 看历史</b>：每次查询自动记入对比表，涨绿跌红。Top1 绝对分低于 0.55 亮红灯——很可能题库不对，不要信答案。</p>
 
-function tokenize(s) {
-  s = s.replace(/\s+/g, '');
-  const set = new Set();
-  for (let i = 0; i < s.length; i++) set.add(s[i]);
-  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
-  return set;
-}
-function kwScore(qt, context) {
-  const ctx = tokenize(context);
-  let hit = 0;
-  for (const t of qt) if (ctx.has(t)) hit += t.length > 1 ? 2 : 1;
-  return hit / Math.sqrt(context.length);
-}
-function cosSim(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
+<h2>四、分数怎么看（只记两列）</h2>
+<p><b>混合分</b>：当轮排序用，第一名恒为 1，只管谁第几。<b>向量分（绝对）</b>：跨轮比较用，认准度。本页和仪表盘现在双列都有，对不上先看列名。</p>
 
-$('run').onclick = async () => {
-  const query = $('q').value.trim();
-  if (!query) { $('log').textContent = '请先输入问题'; return; }
-  try {
-    if (!chunks) {
-      $('log').textContent = '加载数据中…';
-      chunks = await (await fetch('./data/chunks.json')).json();
-      vecs = await (await fetch('./data/embeddings.json')).json();
-    }
-    if (!ex) {
-      $('log').textContent = '首次下载向量模型（约100MB，一次）…';
-      ex = await pipeline('feature-extraction', 'Xenova/bge-small-zh-v1.5');
-    }
-    $('log').textContent = '检索中…';
-    const t0 = Date.now();
-    const qv = Array.from((await ex(query, { pooling: 'mean', normalize: true })).data);
-    const qt = tokenize(query);
-    const ks = chunks.map((c) => kwScore(qt, c.context));
-    const vs = chunks.map((v, i) => cosSim(qv, vecs[i]));
-    const norm = (arr) => { const mn = Math.min(...arr), mx = Math.max(...arr); return arr.map((v) => (mx === mn ? 0 : (v - mn) / (mx - mn))); };
-    const nk = norm(ks), nv = norm(vs);
-    const alpha = +$('alpha').value, k = +$('topK').value;
-    const top = chunks.map((c, i) => ({ t: c.title.split('#')[0], s: alpha * nv[i] + (1 - alpha) * nk[i], sv: vs[i], sk: ks[i], snippet: c.context.slice(0, 100) }))
-      .sort((a, b) => b.s - a.s).slice(0, k);
-    document.getElementById('res').innerHTML = top.map((h, i) =>
-      `<tr><td>Top${i + 1}</td><td>《${h.t}》</td><td>${h.s.toFixed(3)}</td><td>${h.sv.toFixed(3)}</td><td>${h.sk.toFixed(3)}</td><td>${h.snippet}…</td></tr>`).join('');
-    const ms = Date.now() - t0;
-    $('log').textContent = `256块，${ms}ms（向量在浏览器里算的）`;
-    $('warn').textContent = top[0].sv < 0.55
-      ? `⚠ Top1绝对相似度仅${top[0].sv.toFixed(3)}（低于0.55置信线）：可能题库不对，不要信这份答案。`
-      : '';
-    const hist = getHist();
-    hist.push({ time: new Date().toISOString(), q: query.slice(0, 30), topK: k, alpha, top1: top[0].t.slice(0, 12), top1s: +top[0].sv.toFixed(3), ms });
-    localStorage.setItem(HKEY, JSON.stringify(hist.slice(-20)));
-    loadHist();
-  } catch (e) { $('log').textContent = '出错：' + e.message; }
-};
+<h2>五、切分方法（6 种，仪表盘可切）</h2>
+<p>固定 500 字 / 按自然段 / 递归切分 / 标点语义边界 / 按文档结构 / 父子块。记住一句：<b>切分是建库时定的</b>，改切法等于重建库；仪表盘只能切换已切好的版本。</p>
 
-$('clearHist').onclick = () => { localStorage.removeItem(HKEY); loadHist(); };
-
-function loadHist() {
-  const rev = [...getHist()].slice(-20).reverse();
-  document.querySelector('#runs tbody').innerHTML = rev.map((h, i) => {
-    let cls = 'flat';
-    if (i < rev.length - 1) { const d = +(h.top1s - rev[i + 1].top1s).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
-    return `<tr><td>${(h.time || '').slice(5, 16).replace('T', ' ')}</td><td>${(h.q || '').slice(0, 10)}</td><td>${h.topK}</td><td>${h.alpha}</td><td>《${(h.top1 || '').slice(0, 12)}》</td><td class="${cls}">${h.top1s}</td><td>${h.ms}ms</td></tr>`;
-  }).join('');
-  if (chart2) chart2.destroy();
-  chart2 = new Chart(document.getElementById('hist1'), {
-    type: 'line',
-    data: { labels: rev.map((_, i) => i + 1), datasets: [{ data: rev.map((h) => h.top1s) }] },
-    options: { plugins: { legend: { display: false } }, scales: { x: { reverse: true, title: { display: true, text: '查询（左新右旧）' } }, y: { title: { display: true, text: 'Top1原始向量分（越高越好）' } } } },
-  });
-}
-loadHist();
-</script>
+<h2>六、完整版与源码</h2>
+<p>本页是最小演示（单库单切法）。完整仪表盘（三池六刀法、本地导入、历史曲线）在本机跑，源码与数据全开源：<a href="https://github.com/wdz316/rag-practice">github.com/wdz316/rag-practice</a>。</p>
+<p><a class="cta" href="./demo.html">👉 去演示页动手玩</a></p>
 </body>
 </html>
