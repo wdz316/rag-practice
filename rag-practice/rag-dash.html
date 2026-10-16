@@ -26,7 +26,7 @@
 <div class="panel">
   <div id="tip"></div>
   <p><label>库：</label><select id="pool"></select> <span class="qp" data-k="pool">?</span></p>
-  <p id="methodRow" style="display:none"><label>切分方法：</label><select id="method"></select> <span class="qp" data-k="method">?</span></p>
+  <p id="methodRow" style="display:none"><label>切分方法：</label><span class="qp" data-k="method">?</span><br><span id="methodList"></span><br><span id="methodHint" style="font-size:13px;color:#666"></span></p>
   <p><button id="apply">应用切分</button> <span id="applyLog">尚未应用，请先选库和方法后点应用</span></p>
 </div>
 
@@ -41,9 +41,12 @@
   <table id="res"><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>向量分</th><th>关键词分</th><th>字数/token(预估)</th><th>片段</th></tr></thead><tbody></tbody></table>
 </div>
 
-<h2>③ 历史对比表（每次查询自动落表 + Top1走势）</h2>
+<h2>③ 历史对比表（每次查询自动落表）</h2>
 <div class="panel">
-  <canvas id="hist" height="80"></canvas>
+  <canvas id="hist1" height="80"></canvas>
+  <div style="font-size:13px;color:#666">图一：Top1混合分走势（重点：调参有没有涨）</div>
+  <canvas id="hist2" height="80"></canvas>
+  <div style="font-size:13px;color:#666">图二：本轮token走势（重点：贵不贵）</div>
   <table id="runs"><thead><tr><th>时间</th><th>库/切分方法</th><th>问题</th><th>TopK</th><th>alpha</th><th>Top1</th><th>Top1分</th><th>token</th><th>耗时</th></tr></thead><tbody></tbody></table>
 </div>
 
@@ -66,36 +69,50 @@ document.querySelectorAll('.qp').forEach((el) => {
   el.addEventListener('mouseleave', () => tip.style.display = 'none');
   el.addEventListener('click', show);
 });
-const step = (id, d, min, max) => { const el = $(id); el.value = Math.min(max, Math.max(min, +( +el.value + d).toFixed(1))); el.oninput(); };
-$('topKm').onclick = () => step('topK', -1, 1, 10);
-$('topKp').onclick = () => step('topK', 1, 1, 10);
-$('alphaM').onclick = () => step('alpha', -0.1, 0, 1);
-$('alphaP').onclick = () => step('alpha', 0.1, 0, 1);
+const step = (id, dispId, d, min, max) => {
+  const el = $(id);
+  el.value = Math.min(max, Math.max(min, +( +el.value + d).toFixed(1)));
+  $(dispId).textContent = el.value; // 修1：直接刷新数字，不依赖事件对象
+};
+$('topKm').onclick = () => step('topK', 'topKv', -1, 1, 10);
+$('topKp').onclick = () => step('topK', 'topKv', 1, 1, 10);
+$('alphaM').onclick = () => step('alpha', 'alphaV', -0.1, 0, 1);
+$('alphaP').onclick = () => step('alpha', 'alphaV', 0.1, 0, 1);
 $('topK').oninput = (e) => $('topKv').textContent = e.target.value;
 $('alpha').oninput = (e) => $('alphaV').textContent = e.target.value;
-let chart2 = null, POOLS = [], applied = null;
+let chart2 = null, chart3 = null, POOLS = [], applied = null;
 
+const curMethod = () => { const r = document.querySelector('input[name=method]:checked'); return r ? r.value : null; };
 fetch('/api/pools').then((r) => r.json()).then((pools) => {
   POOLS = pools;
   $('pool').innerHTML = pools.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
+  const resetApply = () => { applied = null; $('applyLog').textContent = '尚未应用，请先选库和方法后点应用'; $('applyLog').className = ''; };
+  // 修2：切分方法改单选列表，每项悬停跟鼠标显示该项说明
   const showMethods = () => {
     const p = pools.find((x) => x.id === $('pool').value);
     const hasM = !!p.methods;
     $('methodRow').style.display = hasM ? '' : 'none';
-    if (hasM) $('method').innerHTML = Object.keys(p.methods).map((id) => `<option value="${id}">${id}</option>`).join('');
-    applied = null;
-    $('applyLog').textContent = '尚未应用，请先选库和方法后点应用';
-    $('applyLog').className = '';
+    if (hasM) {
+      $('methodList').innerHTML = Object.entries(p.methods).map(([id, desc], i) =>
+        `<label style="width:auto;margin-right:12px"><input type="radio" name="method" value="${id}"${i === 0 ? ' checked' : ''}>${id}</label>`).join('');
+      document.querySelectorAll('input[name=method]').forEach((radio) => {
+        radio.addEventListener('mouseenter', (e) => { tip.style.display = 'block'; tip.textContent = p.methods[radio.value]; tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; });
+        radio.addEventListener('mousemove', (e) => { tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; });
+        radio.addEventListener('mouseleave', () => tip.style.display = 'none');
+        radio.addEventListener('change', () => { $('methodHint').textContent = '当前：' + p.methods[radio.value]; resetApply(); });
+      });
+      $('methodHint').textContent = '当前：' + p.methods[Object.keys(p.methods)[0]];
+    }
+    resetApply();
   };
   $('pool').onchange = showMethods;
-  $('method').onchange = () => { applied = null; $('applyLog').textContent = '尚未应用，请先选库和方法后点应用'; $('applyLog').className = ''; };
   showMethods();
 });
 
 $('apply').onclick = async () => {
   $('applyLog').textContent = '应用中…';
   const body = { pool: $('pool').value };
-  if ($('methodRow').style.display !== 'none') body.method = $('method').value;
+  if ($('methodRow').style.display !== 'none' && curMethod()) body.method = curMethod();
   const r = await fetch('/api/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const res = await r.json();
   if (!r.ok) { $('applyLog').textContent = res.error || '出错'; return; }
@@ -127,11 +144,25 @@ async function loadHist() {
     if (i > 0) { const d = +(h.top1s - last[i - 1].top1s).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
     return `<tr><td>${(h.time || '').slice(5, 16).replace('T', ' ')}</td><td>${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''}</td><td>${(h.q || '').slice(0, 10)}</td><td>${h.topK}</td><td>${h.alpha}</td><td>《${(h.top1 || '').slice(0, 12)}》</td><td class="${cls}">${h.top1s}</td><td>${h.tokens || ''}</td><td>${h.ms}ms</td></tr>`;
   }).join('');
+  // 修3：指标分开展示，每张图带坐标轴标题，悬停看本轮参数
+  const tipCb = {
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { label: (c) => { const h = last[c.dataIndex]; return `${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''} ${(h.q || '').slice(0, 12)} TopK${h.topK} a${h.alpha}：${c.parsed.y}`; } } },
+    },
+    scales: { x: { title: { display: true, text: '查询次数（从左到右从旧到新）' } } },
+  };
   if (chart2) chart2.destroy();
-  chart2 = new Chart(document.getElementById('hist'), {
+  chart2 = new Chart(document.getElementById('hist1'), {
     type: 'line',
-    data: { labels: last.map((_, i) => i + 1), datasets: [{ label: 'Top1分走势（重点：调参有没有涨）', data: last.map((h) => h.top1s) }] },
-    options: { plugins: { legend: { display: false } } },
+    data: { labels: last.map((_, i) => i + 1), datasets: [{ data: last.map((h) => h.top1s) }] },
+    options: { ...tipCb, scales: { ...tipCb.scales, y: { title: { display: true, text: 'Top1混合分（越高越好）' } } } },
+  });
+  if (chart3) chart3.destroy();
+  chart3 = new Chart(document.getElementById('hist2'), {
+    type: 'line',
+    data: { labels: last.map((_, i) => i + 1), datasets: [{ data: last.map((h) => h.tokens || 0) }] },
+    options: { ...tipCb, scales: { ...tipCb.scales, y: { title: { display: true, text: '本轮token预估（越少越省钱）' } } } },
   });
 }
 loadHist();
