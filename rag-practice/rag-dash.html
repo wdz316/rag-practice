@@ -94,9 +94,9 @@ fetch('/api/pools').then((r) => r.json()).then((pools) => {
   const showMethods = () => {
     const p = pools.find((x) => x.id === $('pool').value);
     const hasM = !!p.methods;
-    $('methodRow').style.display = hasM ? '' : 'none';
+    $('methodRow').style.display = '';
     if (hasM) {
-      $('methodList').innerHTML = Object.entries(p.methods).map(([id, desc], i) =>
+      $('methodList').innerHTML = Object.entries(p.methods).map(([id], i) =>
         `<label style="width:auto;margin-right:12px"><input type="radio" name="method" value="${id}"${i === 0 ? ' checked' : ''}>${id}</label>`).join('');
       document.querySelectorAll('input[name=method]').forEach((radio) => {
         radio.addEventListener('mouseenter', (e) => { tip.style.display = 'block'; tip.textContent = p.methods[radio.value]; tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; });
@@ -105,6 +105,10 @@ fetch('/api/pools').then((r) => r.json()).then((pools) => {
         radio.addEventListener('change', () => { $('methodHint').textContent = '当前：' + p.methods[radio.value]; resetApply(); });
       });
       $('methodHint').textContent = '当前：' + p.methods[Object.keys(p.methods)[0]];
+    } else {
+      // 单一切块的库：不让选，但摆出来（该库切块已锁定）
+      $('methodList').innerHTML = '';
+      $('methodHint').textContent = '该库切块已锁定：' + p.chunkRule + '（不可切换）';
     }
     resetApply();
   };
@@ -115,7 +119,7 @@ fetch('/api/pools').then((r) => r.json()).then((pools) => {
 $('apply').onclick = async () => {
   $('applyLog').textContent = '应用中…';
   const body = { pool: $('pool').value };
-  if ($('methodRow').style.display !== 'none' && curMethod()) body.method = curMethod();
+  if (curMethod()) body.method = curMethod();
   const r = await fetch('/api/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const res = await r.json();
   if (!r.ok) { $('applyLog').textContent = res.error || '出错'; return; }
