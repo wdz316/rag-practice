@@ -106,7 +106,7 @@ fetch('/api/pools').then((r) => r.json()).then((pools) => {
       });
       $('methodHint').textContent = '当前：' + p.methods[Object.keys(p.methods)[0]];
     } else {
-      // 单一切块的库：不让选，但摆出来（该库切块已锁定）
+      // 单一切块的库：清空旧单选，只留一行锁定说明
       $('methodList').innerHTML = '';
       $('methodHint').textContent = '该库切块已锁定：' + p.chunkRule + '（不可切换）';
     }

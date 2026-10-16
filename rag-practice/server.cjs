@@ -37,8 +37,28 @@ const POOLS = {
     },
   },
   moutai: {
-    name: 'moutai2012·茅台年报', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
-    chunkRule: '表>10行按行拆+首行贴头，文500字滑窗100重叠，共2012块',
+    name: 'moutai·茅台年报', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
+    chunkRule: '6切分方法可切（正文）+ 269张表共享（行拆池另见moutai2012）',
+    methods: true,
+    load(method = 'fixed500') {
+      // 正文按切分方法 + 269张整表共享（从v1切片，零重算，保证表题可答）
+      const texts = JSON.parse(fs.readFileSync(path.join(PDFD, `chunks_moutai_${method}.json`), 'utf-8'))
+        .map((c) => ({ title: '茅台年报', context: c.context, _id: c.title, parent: c.parent }));
+      const tvecs = JSON.parse(fs.readFileSync(path.join(PDFD, `emb_moutai_${method}.json`), 'utf-8'));
+      const v1chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      const v1vecs = JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings.json'), 'utf-8'));
+      const tables = [], tvec = [];
+      v1chunks.forEach((c, i) => {
+        if (c.chunk_type === 'table') { tables.push({ title: c.chunk_id, context: c.text }); tvec.push(v1vecs[i]); }
+      });
+      let parents = null;
+      if (method === 'child') parents = JSON.parse(fs.readFileSync(path.join(PDFD, 'parents_moutai_child.json'), 'utf-8'));
+      return { chunks: [...texts, ...tables], vecs: [...tvecs, ...tvec], parents };
+    },
+  },
+  moutai2012: {
+    name: 'moutai2012·行拆旧池', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
+    chunkRule: '表>10行按行拆+首行贴头，文500字滑窗100重叠，共2012块（保留对照）',
     load() {
       const chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks_v2.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
         const c = JSON.parse(l);
@@ -143,10 +163,10 @@ const server = http.createServer(async (req, res) => {
       for await (const ch of req) body += ch;
       const { pool = 'trial', method = 'para' } = JSON.parse(body || '{}');
       if (!POOLS[pool]) throw new Error('未知库');
-      const P = getPool(pool, pool === 'trial' ? method : undefined);
+      const P = getPool(pool, POOLS[pool].methods ? method : undefined);
       const avg = Math.round(P.chunks.reduce((a, c) => a + c.context.length, 0) / P.chunks.length);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, pool, method: pool === 'trial' ? method : '-', chunks: P.chunks.length, avgChars: avg }));
+      res.end(JSON.stringify({ ok: true, pool, method: POOLS[pool].methods ? method : '-', chunks: P.chunks.length, avgChars: avg }));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/search') {
@@ -159,7 +179,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (!POOLS[pool]) throw new Error('未知库');
-      const P = getPool(pool, pool === 'trial' ? method : undefined);
+      const P = getPool(pool, POOLS[pool].methods ? method : undefined);
       const t0 = Date.now();
       const ex = await getExtractor(P.model);
       const qv = Array.from((await ex(query, { pooling: 'mean', normalize: true })).data);
@@ -178,7 +198,7 @@ const server = http.createServer(async (req, res) => {
       const k = Math.max(1, Math.min(20, topK));
       const top = P.chunks.map((c, i) => {
         // 父子块：检索命中的是子块，展示与计费按父段（检得准、给得全）
-        const shown = (method === 'child' && pool === 'trial' && P.parents && P.parents[c.parent])
+        const shown = (method === 'child' && P.methods && P.parents && P.parents[c.parent])
           ? { title: P.parents[c.parent].title, context: P.parents[c.parent].context, via: c._id }
           : { title: c.title, context: c.context, via: null };
         const chars = shown.context.length;
@@ -193,7 +213,7 @@ const server = http.createServer(async (req, res) => {
       }).sort((a, b) => b.score - a.score).slice(0, k);
       const totalTokens = top.reduce((a, h) => a + h.tokens, 0);
       const ms = Date.now() - t0;
-      const rec = { time: new Date().toISOString(), pool, method: pool === 'trial' ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, ms, tokens: totalTokens };
+      const rec = { time: new Date().toISOString(), pool, method: POOLS[pool].methods ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, ms, tokens: totalTokens };
       fs.appendFileSync(HIST, JSON.stringify(rec) + '\n'); // 每次查询自动落表
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: pool === 'trial' ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top }));
@@ -268,7 +288,7 @@ const server = http.createServer(async (req, res) => {
     const allow = new Set(['rag-dash.html', 'chart.min.js']);
     const name = decodeURIComponent(url.pathname.replace(/^\//, '')) || 'rag-dash.html';
     if (!allow.has(name)) { res.writeHead(404); res.end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(name)] || 'text/plain' });
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(name)] || 'text/plain', 'Cache-Control': 'no-store' });
     res.end(fs.readFileSync(path.join(ROOT, name)));
   } catch (e) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
