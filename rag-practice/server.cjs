@@ -161,14 +161,20 @@ const server = http.createServer(async (req, res) => {
       for await (const ch of req) body += ch;
       const { pool = 'trial', method = 'para' } = JSON.parse(body || '{}');
       if (!POOLS[pool]) throw new Error('未知库');
-      const needBuild = pool === 'moutai' && method !== 'tablerow' &&
-        (!fs.existsSync(path.join(PDFD, `chunks_moutai_${method}.json`)) ||
-         !fs.existsSync(path.join(PDFD, `emb_moutai_${method}.json`)));
+      // 按需现切：各池缺向量时起后台任务现切（trial/moutai；tablerow与tatqa等锁池无builder，常驻）
+      const BUILDERS = {
+        trial: { script: 'methods_trial.cjs', cwd: ROOT, chunks: (m) => `chunks_trial_${m}.json`, vecs: (m) => `emb_trial_${m}.json`, dir: ROOT },
+        moutai: { script: 'methods_moutai.cjs', cwd: PDFD, chunks: (m) => `chunks_moutai_${m}.json`, vecs: (m) => `emb_moutai_${m}.json`, dir: PDFD },
+      };
+      const bd = BUILDERS[pool];
+      const needBuild = bd && method !== 'tablerow' &&
+        (!fs.existsSync(path.join(bd.dir, bd.chunks(method))) ||
+         !fs.existsSync(path.join(bd.dir, bd.vecs(method))));
       if (needBuild) {
         const id = 'job_' + Date.now().toString(36);
         jobs[id] = { status: 'running', done: 0, total: 0, pool, method, error: null };
         const { spawn } = require('child_process');
-        const child = spawn(process.execPath, ['methods_moutai.cjs', method], { cwd: PDFD });
+        const child = spawn(process.execPath, [bd.script, method], { cwd: bd.cwd });
         let buf = '';
         child.stdout.on('data', (d) => {
           buf += d.toString();
