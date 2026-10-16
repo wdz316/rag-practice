@@ -26,6 +26,7 @@
 <div class="panel">
   <div id="tip"></div>
   <p><label>库：</label><select id="pool"></select> <span class="qp" data-k="pool">?</span></p>
+  <p><label>本地导入：</label><input type="text" id="importDir" value="" placeholder="本机文件夹完整路径，如 D:\docs" style="width:300px"> <button id="importBtn">导入建池</button> <span class="qp" data-k="import">?</span><br><span id="importLog" style="font-size:13px;color:#666"></span></p>
   <p id="methodRow" style="display:none"><label>切分方法：</label><span class="qp" data-k="method">?</span><br><span id="methodList"></span><br><span id="methodHint" style="font-size:13px;color:#666"></span></p>
   <p><button id="apply">应用切分</button> <span id="applyLog">尚未应用，请先选库和方法后点应用</span></p>
 </div>
@@ -41,19 +42,21 @@
   <table id="res"><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>向量分</th><th>关键词分</th><th>字数/token(预估)</th><th>片段</th></tr></thead><tbody></tbody></table>
 </div>
 
-<h2>③ 历史对比表（每次查询自动落表）</h2>
+<h2>③ 历史对比表（每次查询自动落表，最新在上）</h2>
 <div class="panel">
+  <p><button id="clearHist">清空历史</button> <button id="exportCsv">导出CSV</button></p>
   <canvas id="hist1" height="80"></canvas>
-  <div style="font-size:13px;color:#666">图一：Top1混合分走势（重点：调参有没有涨）</div>
+  <div style="font-size:13px;color:#666">图一：Top1混合分走势（左新右旧）</div>
   <canvas id="hist2" height="80"></canvas>
-  <div style="font-size:13px;color:#666">图二：本轮token走势（重点：贵不贵）</div>
+  <div style="font-size:13px;color:#666">图二：本轮token走势（左新右旧）</div>
   <table id="runs"><thead><tr><th>时间</th><th>库/切分方法</th><th>问题</th><th>TopK</th><th>alpha</th><th>Top1</th><th>Top1分</th><th>token</th><th>耗时</th></tr></thead><tbody></tbody></table>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const TIPS = {
-  pool: '库：切好的池子。切分是建库时定的，运行时改不了，只能切换已切好的库。好比菜只能从备好的菜里选，不能进厨房重切。trial=中文百科256块，moutai=茅台年报2012块，tatqa=英文财报1634块。',
+  pool: '库：切好的池子。切分是建库时定的，运行时改不了，只能切换已切好的库。好比菜只能从备好的菜里选，不能进厨房重切。trial=中文百科256块，moutai=茅台年报2012块，tatqa=英文财报1634块。自建池从下面“本地导入”来。',
+  import: '本地导入：在本机选个文件夹（txt/md文件），系统读进去按500字切块、算向量，建成一个自建池。限制50个文件、合计5MB。PDF要先转成文本再导。',
   method: '切分方法（仅trial库可选，共6种）：固定500字=按固定字数切，好比豆腐刀，快但可能从句中切断；按自然段=按作者原有段落切；递归切分=按段落→句子→分号逐级切；标点语义边界=按句号断句，块长300–600字；按文档结构=标题与段落组合，每块带标题；父子块=200字小块检索，命中返回所属整段。',
   q: '空问题会被拦截，不出结果。口语化提问考向量，原词原文考关键词。',
   topK: 'TopK=返回前K个最相关的块，好比给模型看K页纸。K小易漏，K大又贵又吵，常用5（实测1→5从61%涨到78%，5→10只到81%）。−/+每次调1格。',
@@ -139,32 +142,59 @@ $('run').onclick = async () => {
 async function loadHist() {
   const rows = await (await fetch('/api/runs')).json();
   const last = rows.slice(-20);
-  document.querySelector('#runs tbody').innerHTML = last.map((h, i) => {
+  const rev = [...last].reverse(); // 最新在上
+  document.querySelector('#runs tbody').innerHTML = rev.map((h, i) => {
     let cls = 'flat';
-    if (i > 0) { const d = +(h.top1s - last[i - 1].top1s).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
+    if (i < rev.length - 1) { const d = +(h.top1s - rev[i + 1].top1s).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
     return `<tr><td>${(h.time || '').slice(5, 16).replace('T', ' ')}</td><td>${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''}</td><td>${(h.q || '').slice(0, 10)}</td><td>${h.topK}</td><td>${h.alpha}</td><td>《${(h.top1 || '').slice(0, 12)}》</td><td class="${cls}">${h.top1s}</td><td>${h.tokens || ''}</td><td>${h.ms}ms</td></tr>`;
   }).join('');
-  // 修3：指标分开展示，每张图带坐标轴标题，悬停看本轮参数
   const tipCb = {
     plugins: {
       legend: { display: false },
-      tooltip: { callbacks: { label: (c) => { const h = last[c.dataIndex]; return `${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''} ${(h.q || '').slice(0, 12)} TopK${h.topK} a${h.alpha}：${c.parsed.y}`; } } },
+      tooltip: { callbacks: { label: (c) => { const h = rev[c.dataIndex]; return `${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''} ${(h.q || '').slice(0, 12)} TopK${h.topK} a${h.alpha}：${c.parsed.y}`; } } },
     },
-    scales: { x: { title: { display: true, text: '查询次数（从左到右从旧到新）' } } },
+    scales: { x: { reverse: true, title: { display: true, text: '查询（左新右旧）' } } },
   };
   if (chart2) chart2.destroy();
   chart2 = new Chart(document.getElementById('hist1'), {
     type: 'line',
-    data: { labels: last.map((_, i) => i + 1), datasets: [{ data: last.map((h) => h.top1s) }] },
+    data: { labels: rev.map((_, i) => i + 1), datasets: [{ data: rev.map((h) => h.top1s) }] },
     options: { ...tipCb, scales: { ...tipCb.scales, y: { title: { display: true, text: 'Top1混合分（越高越好）' } } } },
   });
   if (chart3) chart3.destroy();
   chart3 = new Chart(document.getElementById('hist2'), {
     type: 'line',
-    data: { labels: last.map((_, i) => i + 1), datasets: [{ data: last.map((h) => h.tokens || 0) }] },
+    data: { labels: rev.map((_, i) => i + 1), datasets: [{ data: rev.map((h) => h.tokens || 0) }] },
     options: { ...tipCb, scales: { ...tipCb.scales, y: { title: { display: true, text: '本轮token预估（越少越省钱）' } } } },
   });
 }
+$('clearHist').onclick = async () => {
+  await fetch('/api/runs', { method: 'DELETE' });
+  loadHist();
+};
+$('exportCsv').onclick = async () => {
+  const rows = await (await fetch('/api/runs')).json();
+  const head = 'time,pool,method,q,topK,alpha,top1,top1s,tokens,ms';
+  const csv = [head, ...rows.map((h) => [h.time, h.pool, h.method || '', `"${(h.q || '').replace(/"/g, '""')}"`, h.topK, h.alpha, `"${(h.top1 || '').replace(/"/g, '""')}"`, h.top1s, h.tokens || '', h.ms].join(','))].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = 'rag_runs.csv';
+  a.click();
+};
+$('importBtn').onclick = async () => {
+  const dir = $('importDir').value.trim();
+  if (!dir) { $('importLog').textContent = '请先填本机文件夹完整路径'; return; }
+  $('importLog').textContent = '导入中（读文件→切块→向量化，稍等）…';
+  const r = await fetch('/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) });
+  const res = await r.json();
+  if (!r.ok) { $('importLog').textContent = res.error || '出错'; return; }
+  $('importLog').textContent = `导入成功：${res.name}，${res.files}个文件→${res.chunks}块，已出现在库下拉中，去①区选它点应用`;
+  const pools = await (await fetch('/api/pools')).json();
+  const cur = $('pool').value;
+  $('pool').innerHTML = pools.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
+  $('pool').value = [...$('pool').options].some((o) => o.value === res.id) ? res.id : cur;
+  $('pool').onchange();
+};
 loadHist();
 </script>
 </body>

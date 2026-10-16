@@ -60,6 +60,25 @@ const POOLS = {
   },
 };
 const cache = {};
+// 自定义池注册表（本地目录导入，持久化，重启不丢）
+const REG = path.join(ROOT, 'custom_pools.json');
+function loadRegistry() {
+  try {
+    if (fs.existsSync(REG)) {
+      for (const r of JSON.parse(fs.readFileSync(REG, 'utf-8'))) {
+        POOLS[r.id] = {
+          name: r.name, lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
+          chunkRule: r.chunkRule, custom: true,
+          load() {
+            const chunks = JSON.parse(fs.readFileSync(path.join(ROOT, r.chunksFile), 'utf-8'));
+            return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(ROOT, r.vecFile), 'utf-8')) };
+          },
+        };
+      }
+    }
+  } catch (e) { console.error('注册表损坏，已跳过：' + e.message); }
+}
+loadRegistry();
 function getPool(id, method) {
   const key = id + ':' + (method || '');
   if (!cache[key]) {
@@ -183,6 +202,67 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/runs' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(fs.existsSync(HIST) ? fs.readFileSync(HIST, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []));
+      return;
+    }
+    if (url.pathname === '/api/runs' && req.method === 'DELETE') {
+      // 清空历史记录（experiments.jsonl 清零，文件保留）
+      fs.writeFileSync(HIST, '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/import') {
+      // 本地目录导入：读 .txt/.md（PDF需先转文本），500字滑窗100重叠切块，向量化后注册为新池
+      // 限制：最多50个文件、合计不超5MB，防手滑选了个C盘
+      let body = '';
+      for await (const ch of req) body += ch;
+      const { dir = '' } = JSON.parse(body || '{}');
+      if (!dir.trim() || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error('目录不存在，请填本机文件夹完整路径');
+      const files = fs.readdirSync(dir).filter((f) => /\.(txt|md)$/i.test(f)).slice(0, 50);
+      if (!files.length) throw new Error('目录里没有 .txt/.md 文件（PDF请先转成文本再导入）');
+      let total = 0;
+      const texts = files.map((f) => {
+        const t = fs.readFileSync(path.join(dir, f), 'utf-8');
+        total += t.length;
+        return { name: f, text: t };
+      });
+      if (total > 5 * 1024 * 1024) throw new Error('文件合计超5MB，先拆小再导');
+      const chunks = [];
+      for (const { name, text } of texts) {
+        for (let s = 0, k = 0; s < text.length; s += 400, k++) {
+          const part = text.slice(s, s + 500).trim();
+          if (part.length < 50) continue;
+          chunks.push({ title: `${name}#${k}`, context: part });
+        }
+      }
+      const crypto = require('crypto');
+      const id = 'custom_' + crypto.createHash('md5').update(dir).digest('hex').slice(0, 8);
+      const chunksFile = `chunks_${id}.json`, vecFile = `emb_${id}.json`;
+      fs.writeFileSync(path.join(ROOT, chunksFile), JSON.stringify(chunks));
+      const ex = await getExtractor('Xenova/bge-small-zh-v1.5');
+      const vecs = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const o = await ex(chunks[i].context.slice(0, 1500), { pooling: 'mean', normalize: true });
+        vecs.push(Array.from(o.data));
+      }
+      fs.writeFileSync(path.join(ROOT, vecFile), JSON.stringify(vecs));
+      const name = '自建池·' + path.basename(dir);
+      POOLS[id] = {
+        name, lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
+        chunkRule: `本地目录导入（${files.length}个文件，500字滑窗100重叠），共${chunks.length}块`,
+        custom: true,
+        load() {
+          return {
+            chunks: JSON.parse(fs.readFileSync(path.join(ROOT, chunksFile), 'utf-8')),
+            vecs: JSON.parse(fs.readFileSync(path.join(ROOT, vecFile), 'utf-8')),
+          };
+        },
+      };
+      const reg = fs.existsSync(REG) ? JSON.parse(fs.readFileSync(REG, 'utf-8')) : [];
+      fs.writeFileSync(REG, JSON.stringify([...reg.filter((r) => r.id !== id), { id, name, chunkRule: POOLS[id].chunkRule, chunksFile, vecFile }]));
+      delete cache[id + ':']; // 索引更新必须清内存缓存，否则查到的是旧向量（刚现抓一条）
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, id, name, files: files.length, chunks: chunks.length }));
       return;
     }
     const allow = new Set(['rag-dash.html', 'chart.min.js']);
