@@ -38,12 +38,15 @@ async function main() {
     let vecs = [];
     if (fs.existsSync(CACHE)) vecs = JSON.parse(fs.readFileSync(CACHE, 'utf-8'));
     console.log('断点续算：已有 ' + vecs.length + '/' + chunks.length);
+    const t0 = Date.now(), n0 = vecs.length;
     for (let i = vecs.length; i < chunks.length; i++) {
       const out = await extractor(chunks[i].text.slice(0, 1500), { pooling: 'mean', normalize: true });
       vecs.push(Array.from(out.data));
       if ((i + 1) % 50 === 0 || i + 1 === chunks.length) {
         fs.writeFileSync(CACHE, JSON.stringify(vecs));
-        console.log('  已完成 ' + (i + 1) + '/' + chunks.length);
+        const el = (Date.now() - t0) / 1000, speed = (i + 1 - n0) / Math.max(el, 0.1);
+        const eta = Math.round((chunks.length - (i + 1)) / speed);
+        console.log(`  已完成 ${i + 1}/${chunks.length} 已用${Math.round(el)}s，预计还剩${Math.round(eta / 60)}分${eta % 60}秒`);
       }
     }
     console.log('完成，维度 ' + vecs[0].length);

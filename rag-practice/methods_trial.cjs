@@ -98,12 +98,15 @@ async function main() {
     const cacheFile = path.join(__dirname, m.file);
     let vecs = fs.existsSync(cacheFile) ? JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) : [];
     console.log(`${name}: ${chunks.length}块，已有${vecs.length}`);
+    const t0 = Date.now(), n0 = vecs.length; // 倒计时：用已耗时间推算剩余
     for (let i = vecs.length; i < chunks.length; i++) {
       const o = await ex(chunks[i].context.slice(0, 1500), { pooling: 'mean', normalize: true });
       vecs.push(Array.from(o.data));
       if ((i + 1) % 100 === 0 || i + 1 === chunks.length) {
         fs.writeFileSync(cacheFile, JSON.stringify(vecs));
-        console.log(`  ${name} ${i + 1}/${chunks.length}`);
+        const el = (Date.now() - t0) / 1000, speed = (i + 1 - n0) / Math.max(el, 0.1);
+        const eta = Math.round((chunks.length - (i + 1)) / speed);
+        console.log(`  ${name} ${i + 1}/${chunks.length} 已用${Math.round(el)}s，预计还剩${Math.round(eta / 60)}分${eta % 60}秒`);
       }
     }
   }

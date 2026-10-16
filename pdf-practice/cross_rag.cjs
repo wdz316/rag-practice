@@ -42,10 +42,15 @@ async function main() {
     const aChunks = rd(AFILE);
     let vecs = [];
     if (fs.existsSync(ACACHE)) vecs = JSON.parse(fs.readFileSync(ACACHE, 'utf-8'));
+    const t0 = Date.now(), n0 = vecs.length;
     for (let i = vecs.length; i < aChunks.length; i++) {
       const out = await extractor(aChunks[i].text.slice(0, 1500), { pooling: 'mean', normalize: true });
       vecs.push(Array.from(out.data));
-      if ((i + 1) % 10 === 0 || i + 1 === aChunks.length) console.log('  公告' + POOL + ' ' + (i + 1) + '/' + aChunks.length);
+      if ((i + 1) % 10 === 0 || i + 1 === aChunks.length) {
+        const el = (Date.now() - t0) / 1000, speed = (i + 1 - n0) / Math.max(el, 0.1);
+        const eta = Math.round((aChunks.length - (i + 1)) / speed);
+        console.log(`  公告${POOL} ${i + 1}/${aChunks.length} 已用${Math.round(el)}s，预计还剩${Math.round(eta / 60)}分${eta % 60}秒`);
+      }
     }
     fs.writeFileSync(ACACHE, JSON.stringify(vecs));
     console.log('公告向量完成，共' + vecs.length);
