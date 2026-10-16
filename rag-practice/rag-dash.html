@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>RAG仪表盘 · 切分配置 + 检索检测</title>
+<script src="./chart.min.js"></script>
+<style>
+  body { font-family: sans-serif; background: #fff; color: #222; max-width: 960px; margin: 0 auto; padding: 16px; }
+  h2 { border-bottom: 2px solid #222; padding-bottom: 4px; }
+  .panel { border: 1px solid #ccc; padding: 12px; margin-bottom: 16px; }
+  label { display: inline-block; width: 110px; }
+  input[type=text] { width: 400px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  th { background: #f2f2f2; }
+  .up { color: green; font-weight: bold; } .down { color: red; font-weight: bold; } .flat { color: gray; }
+  #log, #applyLog { color: #666; font-size: 13px; }
+  .qp { display: inline-block; width: 16px; height: 16px; border: 1px solid #888; border-radius: 50%; text-align: center; font-size: 12px; cursor: pointer; color: #666; }
+  #tip { display: none; position: fixed; z-index: 99; border: 1px solid #888; background: #ffffe8; padding: 8px; font-size: 13px; max-width: 320px; }
+  .step { width: 24px; }
+  .ok { color: green; }
+</style>
+</head>
+<body>
+<h2>① 切分配置（先应用）</h2>
+<div class="panel">
+  <div id="tip"></div>
+  <p><label>库：</label><select id="pool"></select> <span class="qp" data-k="pool">?</span></p>
+  <p id="methodRow" style="display:none"><label>切分方法：</label><select id="method"></select> <span class="qp" data-k="method">?</span></p>
+  <p><button id="apply">应用切分</button> <span id="applyLog">尚未应用，请先选库和方法后点应用</span></p>
+</div>
+
+<h2>② 检索检测（应用后查询）</h2>
+<div class="panel">
+  <p><label>问题：</label><input type="text" id="q" value="" placeholder="先输入问题"> <span class="qp" data-k="q">?</span></p>
+  <p><label>TopK：</label><button class="step" id="topKm">−</button><input type="range" id="topK" min="1" max="10" value="5"><button class="step" id="topKp">+</button> <b id="topKv">5</b> <span class="qp" data-k="topK">?</span></p>
+  <p><label>alpha：</label><button class="step" id="alphaM">−</button><input type="range" id="alpha" min="0" max="1" step="0.1" value="0.7"><button class="step" id="alphaP">+</button> <b id="alphaV">0.7</b> <span class="qp" data-k="alpha">?</span></p>
+  <p><label>距离算法：</label><select id="metric"><option value="cosine">余弦</option><option value="euclid">欧氏</option></select> <span class="qp" data-k="metric">?</span></p>
+  <p><button id="run">运行检索（自动记入对比表）</button> <span id="log"></span></p>
+  <div id="sum" style="font-size:13px;color:#666"></div>
+  <table id="res"><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>向量分</th><th>关键词分</th><th>字数/token(预估)</th><th>片段</th></tr></thead><tbody></tbody></table>
+</div>
+
+<h2>③ 历史对比表（每次查询自动落表 + Top1走势）</h2>
+<div class="panel">
+  <canvas id="hist" height="80"></canvas>
+  <table id="runs"><thead><tr><th>时间</th><th>库/切分方法</th><th>问题</th><th>TopK</th><th>alpha</th><th>Top1</th><th>Top1分</th><th>token</th><th>耗时</th></tr></thead><tbody></tbody></table>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TIPS = {
+  pool: '库：切好的池子。切分是建库时定的，运行时改不了，只能切换已切好的库。好比菜只能从备好的菜里选，不能进厨房重切。trial=中文百科256块，moutai=茅台年报2012块，tatqa=英文财报1634块。',
+  method: '切分方法（仅trial库可选，共6种）：固定500字=按固定字数切，好比豆腐刀，快但可能从句中切断；按自然段=按作者原有段落切；递归切分=按段落→句子→分号逐级切；标点语义边界=按句号断句，块长300–600字；按文档结构=标题与段落组合，每块带标题；父子块=200字小块检索，命中返回所属整段。',
+  q: '空问题会被拦截，不出结果。口语化提问考向量，原词原文考关键词。',
+  topK: 'TopK=返回前K个最相关的块，好比给模型看K页纸。K小易漏，K大又贵又吵，常用5（实测1→5从61%涨到78%，5→10只到81%）。−/+每次调1格。',
+  alpha: 'alpha=向量与关键词的权重。1=只用向量，好比只认意思不认字；0=只用关键词，好比只认字不认意思；0.7=两者混合。−/+每次调0.1。',
+  metric: '距离算法=算两段话有多像的尺子。余弦看方向，欧氏看距离；向量归一化后排出来一样，就像直尺和卷尺量同一张桌子，读数相同。',
+};
+const tip = $('tip');
+document.querySelectorAll('.qp').forEach((el) => {
+  const show = (e) => { tip.style.display = 'block'; tip.textContent = TIPS[el.dataset.k]; move(e); };
+  const move = (e) => { tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; };
+  el.addEventListener('mouseenter', show);
+  el.addEventListener('mousemove', move);
+  el.addEventListener('mouseleave', () => tip.style.display = 'none');
+  el.addEventListener('click', show);
+});
+const step = (id, d, min, max) => { const el = $(id); el.value = Math.min(max, Math.max(min, +( +el.value + d).toFixed(1))); el.oninput(); };
+$('topKm').onclick = () => step('topK', -1, 1, 10);
+$('topKp').onclick = () => step('topK', 1, 1, 10);
+$('alphaM').onclick = () => step('alpha', -0.1, 0, 1);
+$('alphaP').onclick = () => step('alpha', 0.1, 0, 1);
+$('topK').oninput = (e) => $('topKv').textContent = e.target.value;
+$('alpha').oninput = (e) => $('alphaV').textContent = e.target.value;
+let chart2 = null, POOLS = [], applied = null;
+
+fetch('/api/pools').then((r) => r.json()).then((pools) => {
+  POOLS = pools;
+  $('pool').innerHTML = pools.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
+  const showMethods = () => {
+    const p = pools.find((x) => x.id === $('pool').value);
+    const hasM = !!p.methods;
+    $('methodRow').style.display = hasM ? '' : 'none';
+    if (hasM) $('method').innerHTML = Object.keys(p.methods).map((id) => `<option value="${id}">${id}</option>`).join('');
+    applied = null;
+    $('applyLog').textContent = '尚未应用，请先选库和方法后点应用';
+    $('applyLog').className = '';
+  };
+  $('pool').onchange = showMethods;
+  $('method').onchange = () => { applied = null; $('applyLog').textContent = '尚未应用，请先选库和方法后点应用'; $('applyLog').className = ''; };
+  showMethods();
+});
+
+$('apply').onclick = async () => {
+  $('applyLog').textContent = '应用中…';
+  const body = { pool: $('pool').value };
+  if ($('methodRow').style.display !== 'none') body.method = $('method').value;
+  const r = await fetch('/api/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const res = await r.json();
+  if (!r.ok) { $('applyLog').textContent = res.error || '出错'; return; }
+  applied = { pool: body.pool, method: res.method };
+  $('applyLog').innerHTML = `<span class="ok">已应用：${res.method && res.method !== '-' ? '切分方法' + res.method + '，' : ''}共${res.chunks}块，平均${res.avgChars}字，可查询</span>`;
+};
+
+$('run').onclick = async () => {
+  if (!applied) { $('log').textContent = '请先到①区点“应用切分”'; return; }
+  if (!$('q').value.trim()) { $('log').textContent = '请先输入问题'; return; }
+  $('log').textContent = '检索中…';
+  const body = { query: $('q').value, topK: +$('topK').value, alpha: +$('alpha').value, metric: $('metric').value, pool: applied.pool };
+  if (applied.method && applied.method !== '-') body.method = applied.method;
+  const r = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const res = await r.json();
+  if (!r.ok) { $('log').textContent = res.error || '出错'; return; }
+  $('log').textContent = `${res.poolName}${res.method && res.method !== '-' ? '/' + res.method : ''} ${res.poolSize}块，${res.ms}ms，Top${res.topK}共${res.totalTokens}token(预估)`;
+  $('sum').textContent = `本轮合计约${res.totalTokens}token（喂给大模型就是这些，越少越省钱）。`;
+  document.querySelector('#res tbody').innerHTML = res.top.map((h, i) =>
+    `<tr><td>Top${i + 1}</td><td>《${h.title}》${h.via ? '（由子块 ' + h.via.split('#')[1] + ' 命中返父）' : ''}</td><td>${h.score}</td><td>${h.sv}</td><td>${h.sk}</td><td>${h.chars}字/${h.tokens}</td><td>${h.snippet}…</td></tr>`).join('');
+  loadHist();
+};
+
+async function loadHist() {
+  const rows = await (await fetch('/api/runs')).json();
+  const last = rows.slice(-20);
+  document.querySelector('#runs tbody').innerHTML = last.map((h, i) => {
+    let cls = 'flat';
+    if (i > 0) { const d = +(h.top1s - last[i - 1].top1s).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
+    return `<tr><td>${(h.time || '').slice(5, 16).replace('T', ' ')}</td><td>${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''}</td><td>${(h.q || '').slice(0, 10)}</td><td>${h.topK}</td><td>${h.alpha}</td><td>《${(h.top1 || '').slice(0, 12)}》</td><td class="${cls}">${h.top1s}</td><td>${h.tokens || ''}</td><td>${h.ms}ms</td></tr>`;
+  }).join('');
+  if (chart2) chart2.destroy();
+  chart2 = new Chart(document.getElementById('hist'), {
+    type: 'line',
+    data: { labels: last.map((_, i) => i + 1), datasets: [{ label: 'Top1分走势（重点：调参有没有涨）', data: last.map((h) => h.top1s) }] },
+    options: { plugins: { legend: { display: false } } },
+  });
+}
+loadHist();
+</script>
+</body>
+</html>

@@ -1,0 +1,198 @@
+// RAG仪表盘后端 v2：三池切换 + 空查拦截 + token计数 + 每次查询自动落表 + 切分方法切换 + /api/apply
+// 用法：node server.cjs → 打开 http://localhost:8080/rag-dash.html
+// 切块是建库时定的：仪表盘只能切换"已切好的库"，不能运行时改切块（切块锁定原则）
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const { pipeline } = require('@xenova/transformers');
+
+const PORT = 8080;
+const ROOT = __dirname;
+const PDFD = path.join(__dirname, '..', 'pdf-practice');
+
+const opt = (args, n, d) => {
+  const i = args.indexOf(n);
+  return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : d;
+};
+
+const METHODS = {
+  fixed500: '固定500字：按固定字数切分，好比豆腐刀，快但可能从句中切断',
+  para: '按自然段：按作者原有的段落切分，一段一块',
+  recur: '递归切分：按段落→句子→分号逐级切分，大块拆小直到达标，不断句',
+  punct: '标点语义边界：按句号断句，块长度保持在300–600字之间',
+  struct: '按文档结构：标题与段落组合切分，每块前面带上标题（好比每页盖公章）',
+  child: '父子块：用200字小块检索，命中后返回它所属的整段（小块定位、大块给料）',
+};
+const POOLS = {
+  trial: {
+    name: 'trial·中文百科', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
+    chunkRule: '6切分方法可切（见切分方法下拉），基线256块',
+    methods: true,
+    load(method = 'para') {
+      const chunks = JSON.parse(fs.readFileSync(path.join(ROOT, `chunks_trial_${method}.json`), 'utf-8'))
+        .map((c) => ({ title: c.title.split('#')[0], context: c.context, _id: c.title, parent: c.parent }));
+      let parents = null;
+      if (method === 'child') parents = JSON.parse(fs.readFileSync(path.join(ROOT, 'parents_trial_child.json'), 'utf-8'));
+      return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(ROOT, `emb_trial_${method}.json`), 'utf-8')), parents };
+    },
+  },
+  moutai: {
+    name: 'moutai2012·茅台年报', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
+    chunkRule: '表>10行按行拆+首行贴头，文500字滑窗100重叠，共2012块',
+    load() {
+      const chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks_v2.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
+        const c = JSON.parse(l);
+        return { title: c.chunk_id, context: c.text };
+      });
+      return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings_v2.json'), 'utf-8')) };
+    },
+  },
+  tatqa: {
+    name: 'tatqa1634·英文财报表文', lang: 'en', model: 'Xenova/bge-small-en-v1.5',
+    chunkRule: '表整存转markdown，段落原生，共1634块（dev）',
+    load() {
+      const chunks = fs.readFileSync(path.join(ROOT, 'tatqa', 'tatqa_dev_chunks.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
+        const c = JSON.parse(l);
+        return { title: c.chunk_id, context: c.text };
+      });
+      return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(ROOT, 'tatqa', 'tatqa_dev_embeddings.json'), 'utf-8')) };
+    },
+  },
+};
+const cache = {};
+function getPool(id, method) {
+  const key = id + ':' + (method || '');
+  if (!cache[key]) {
+    const P = POOLS[id];
+    const { chunks, vecs, parents } = P.load(method);
+    if (vecs.length !== chunks.length) throw new Error(id + '向量与块数对不上');
+    cache[key] = { ...P, chunks, vecs, parents: parents || null };
+  }
+  return cache[key];
+}
+const models = {};
+async function getExtractor(model) {
+  if (!models[model]) models[model] = await pipeline('feature-extraction', model);
+  return models[model];
+}
+
+// 中文按字、英文按词的字面命中分（关键词那条腿，不经过向量模型）
+function kwScoreZh(qt, context) {
+  const s = context.replace(/\s+/g, '');
+  const set = new Set();
+  for (let i = 0; i < s.length; i++) set.add(s[i]);
+  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+  let hit = 0;
+  for (const t of qt) if (set.has(t)) hit += t.length > 1 ? 2 : 1;
+  return hit / Math.sqrt(context.length);
+}
+function kwScoreEn(qw, context) {
+  const set = new Set((context.toLowerCase().match(/[a-z0-9%$.\-]+/g) || []));
+  let hit = 0;
+  for (const w of qw) if (set.has(w)) hit += w.length >= 5 ? 2 : 1;
+  return hit / Math.sqrt(context.length);
+}
+function cosSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+function euclidSim(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) * (a[i] - b[i]);
+  return 1 - Math.sqrt(s) / 2;
+}
+// token预估：中文字符×0.9，英文单词×1.3（量级参考，非计费口径）
+function estTokens(text, lang) {
+  if (lang === 'en') return Math.round(((text.match(/[a-zA-Z0-9%$.\-]+/g) || []).length) * 1.3);
+  return Math.round(text.replace(/\s+/g, '').length * 0.9);
+}
+
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+const HIST = path.join(ROOT, 'experiments.jsonl');
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x');
+  try {
+    if (url.pathname === '/api/pools' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(Object.entries(POOLS).map(([id, p]) => ({ id, name: p.name, chunkRule: p.chunkRule, methods: p.methods ? METHODS : null }))));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/apply') {
+      // 应用切分：确保该（库,切分方法）的向量已就绪，返回块数与平均长度
+      let body = '';
+      for await (const ch of req) body += ch;
+      const { pool = 'trial', method = 'para' } = JSON.parse(body || '{}');
+      if (!POOLS[pool]) throw new Error('未知库');
+      const P = getPool(pool, pool === 'trial' ? method : undefined);
+      const avg = Math.round(P.chunks.reduce((a, c) => a + c.context.length, 0) / P.chunks.length);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, pool, method: pool === 'trial' ? method : '-', chunks: P.chunks.length, avgChars: avg }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/search') {
+      let body = '';
+      for await (const ch of req) body += ch;
+      const { query = '', topK = 5, alpha = 0.7, metric = 'cosine', pool = 'trial', method = 'para' } = JSON.parse(body || '{}');
+      if (!query.trim()) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: '请先输入问题' }));
+        return;
+      }
+      if (!POOLS[pool]) throw new Error('未知库');
+      const P = getPool(pool, pool === 'trial' ? method : undefined);
+      const t0 = Date.now();
+      const ex = await getExtractor(P.model);
+      const qv = Array.from((await ex(query, { pooling: 'mean', normalize: true })).data);
+      const simFn = metric === 'euclid' ? euclidSim : cosSim;
+      const kwFn = P.lang === 'en' ? kwScoreEn : kwScoreZh;
+      const qt = P.lang === 'en'
+        ? (query.toLowerCase().match(/[a-z0-9%$.\-]+/g) || []).filter((w) => w.length > 1)
+        : (() => { const s = query.replace(/\s+/g, ''); const set = new Set(); for (let i = 0; i < s.length; i++) set.add(s[i]); for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2)); return set; })();
+      const ks = P.chunks.map((c) => kwFn(qt, c.context));
+      const vs = P.chunks.map((v, i) => simFn(qv, P.vecs[i]));
+      const norm = (arr) => {
+        const mn = Math.min(...arr), mx = Math.max(...arr);
+        return arr.map((v) => (mx === mn ? 0 : (v - mn) / (mx - mn)));
+      };
+      const nk = norm(ks), nv = norm(vs);
+      const k = Math.max(1, Math.min(20, topK));
+      const top = P.chunks.map((c, i) => {
+        // 父子块：检索命中的是子块，展示与计费按父段（检得准、给得全）
+        const shown = (method === 'child' && pool === 'trial' && P.parents && P.parents[c.parent])
+          ? { title: P.parents[c.parent].title, context: P.parents[c.parent].context, via: c._id }
+          : { title: c.title, context: c.context, via: null };
+        const chars = shown.context.length;
+        return {
+          title: shown.title.length > 40 ? shown.title.slice(0, 40) + '…' : shown.title,
+          score: +(alpha * nv[i] + (1 - alpha) * nk[i]).toFixed(4),
+          sv: +vs[i].toFixed(4), sk: +ks[i].toFixed(4),
+          chars, tokens: estTokens(shown.context, P.lang),
+          snippet: shown.context.slice(0, 120),
+          via: shown.via,
+        };
+      }).sort((a, b) => b.score - a.score).slice(0, k);
+      const totalTokens = top.reduce((a, h) => a + h.tokens, 0);
+      const ms = Date.now() - t0;
+      const rec = { time: new Date().toISOString(), pool, method: pool === 'trial' ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, ms, tokens: totalTokens };
+      fs.appendFileSync(HIST, JSON.stringify(rec) + '\n'); // 每次查询自动落表
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: pool === 'trial' ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top }));
+      return;
+    }
+    if (url.pathname === '/api/runs' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(fs.existsSync(HIST) ? fs.readFileSync(HIST, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []));
+      return;
+    }
+    const allow = new Set(['rag-dash.html', 'chart.min.js']);
+    const name = decodeURIComponent(url.pathname.replace(/^\//, '')) || 'rag-dash.html';
+    if (!allow.has(name)) { res.writeHead(404); res.end('not found'); return; }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(name)] || 'text/plain' });
+    res.end(fs.readFileSync(path.join(ROOT, name)));
+  } catch (e) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+});
+server.listen(PORT, () => console.log('仪表盘 http://localhost:' + PORT + '/rag-dash.html'));
