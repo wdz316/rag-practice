@@ -38,13 +38,30 @@ const POOLS = {
   },
   moutai: {
     name: 'moutai·茅台年报', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
-    chunkRule: '表>10行按行拆+首行贴头，文500字滑窗100重叠，共2012块',
-    load() {
-      const chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks_v2.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
-        const c = JSON.parse(l);
-        return { title: c.chunk_id, context: c.text };
+    chunkRule: '7切分方法可切（正文）+ 269张表共享（行拆旧池保留为tablerow）',
+    methods: { ...METHODS, tablerow: '行拆旧池：表>10行按行拆+首行贴头+文500滑窗（保留对照，不用现切）' },
+    load(method = 'tablerow') {
+      if (method === 'tablerow') {
+        // 旧池原样保留：行拆+滑窗，不用现切
+        const chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks_v2.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
+          const c = JSON.parse(l);
+          return { title: c.chunk_id, context: c.text };
+        });
+        return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings_v2.json'), 'utf-8')) };
+      }
+      // 6新法：正文现切 + 269张整表共享（从v1切片，零重算）
+      const texts = JSON.parse(fs.readFileSync(path.join(PDFD, `chunks_moutai_${method}.json`), 'utf-8'))
+        .map((c) => ({ title: '茅台年报', context: c.context, _id: c.title, parent: c.parent }));
+      const tvecs = JSON.parse(fs.readFileSync(path.join(PDFD, `emb_moutai_${method}.json`), 'utf-8'));
+      const v1chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      const v1vecs = JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings.json'), 'utf-8'));
+      const tables = [], tvec = [];
+      v1chunks.forEach((c, i) => {
+        if (c.chunk_type === 'table') { tables.push({ title: c.chunk_id, context: c.text }); tvec.push(v1vecs[i]); }
       });
-      return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings_v2.json'), 'utf-8')) };
+      let parents = null;
+      if (method === 'child') parents = JSON.parse(fs.readFileSync(path.join(PDFD, 'parents_moutai_child.json'), 'utf-8'));
+      return { chunks: [...texts, ...tables], vecs: [...tvecs, ...tvec], parents };
     },
   },
   tatqa: {
@@ -134,15 +151,25 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === '/api/pools' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(Object.entries(POOLS).map(([id, p]) => ({ id, name: p.name, chunkRule: p.chunkRule, methods: p.methods ? METHODS : null }))));
+      res.end(JSON.stringify(Object.entries(POOLS).map(([id, p]) => ({ id, name: p.name, chunkRule: p.chunkRule, methods: p.methods === true ? METHODS : (p.methods || null) }))));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/apply') {
-      // 应用切分：确保该（库,切分方法）的向量已就绪，返回块数与平均长度
+      // 应用切分：向量就绪直接返回；缺失则现切现算（只发生在用户点了应用之后，不预切）
       let body = '';
       for await (const ch of req) body += ch;
       const { pool = 'trial', method = 'para' } = JSON.parse(body || '{}');
       if (!POOLS[pool]) throw new Error('未知库');
+      const needBuild = pool === 'moutai' && method !== 'tablerow' &&
+        (!fs.existsSync(path.join(PDFD, `chunks_moutai_${method}.json`)) ||
+         !fs.existsSync(path.join(PDFD, `emb_moutai_${method}.json`)));
+      if (needBuild) {
+        const { execFile } = require('child_process');
+        await new Promise((resolve, reject) => {
+          execFile(process.execPath, ['methods_moutai.cjs', method], { cwd: PDFD, timeout: 20 * 60 * 1000 },
+            (err, stdout, stderr) => err ? reject(new Error('现切失败：' + (stderr || err.message).slice(0, 200))) : resolve(stdout));
+        });
+      }
       const P = getPool(pool, POOLS[pool].methods ? method : undefined);
       const avg = Math.round(P.chunks.reduce((a, c) => a + c.context.length, 0) / P.chunks.length);
       res.writeHead(200, { 'Content-Type': 'application/json' });
