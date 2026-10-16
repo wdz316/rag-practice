@@ -72,7 +72,7 @@ $('run').onclick = async () => {
     const alpha = +$('alpha').value, k = +$('topK').value;
     const top = chunks.map((c, i) => ({ t: c.title.split('#')[0], s: alpha * nv[i] + (1 - alpha) * nk[i], snippet: c.context.slice(0, 100) }))
       .sort((a, b) => b.s - a.s).slice(0, k);
-    document.querySelector('#res tbody').innerHTML = top.map((h, i) =>
+    document.getElementById('res').innerHTML = top.map((h, i) =>
       `<tr><td>Top${i + 1}</td><td>《${h.t}》</td><td>${h.s.toFixed(3)}</td><td>${h.snippet}…</td></tr>`).join('');
     $('log').textContent = `256块，${Date.now() - t0}ms（向量在浏览器里算的）`;
   } catch (e) { $('log').textContent = '出错：' + e.message; }
