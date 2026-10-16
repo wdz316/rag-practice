@@ -242,24 +242,31 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: true }));
       return;
     }
-    if (req.method === 'POST' && url.pathname === '/api/import') {
-      // 本地目录导入：读 .txt/.md（PDF需先转文本），500字滑窗100重叠切块，向量化后注册为新池
-      // 限制：最多50个文件、合计不超5MB，防手滑选了个C盘
+    if (req.method === 'POST' && (url.pathname === '/api/import' || url.pathname === '/api/import_texts')) {
+      // 本地导入两种姿势：①填本机目录（服务端读文件）；②页面点选目录（浏览器读内容POST过来，跨机器也行）
+      // 统一：txt/md，500字滑窗100重叠，<50字丢弃；限制50文件/合计5MB
       let body = '';
       for await (const ch of req) body += ch;
-      const { dir = '' } = JSON.parse(body || '{}');
-      if (!dir.trim() || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error('目录不存在，请填本机文件夹完整路径');
-      const files = fs.readdirSync(dir).filter((f) => /\.(txt|md)$/i.test(f)).slice(0, 50);
-      if (!files.length) throw new Error('目录里没有 .txt/.md 文件（PDF请先转成文本再导入）');
-      let total = 0;
-      const texts = files.map((f) => {
-        const t = fs.readFileSync(path.join(dir, f), 'utf-8');
-        total += t.length;
-        return { name: f, text: t };
-      });
+      const parsed = JSON.parse(body || '{}');
+      let files = [];
+      if (url.pathname === '/api/import_texts') {
+        if (!Array.isArray(parsed.files) || !parsed.files.length) throw new Error('没收到文件，请重新选择目录');
+        files = parsed.files
+          .filter((f) => /\.(txt|md)$/i.test(f.name || ''))
+          .slice(0, 50)
+          .map((f) => ({ name: (f.name || '未命名').split('/').pop(), text: String(f.text || '') }));
+        if (!files.length) throw new Error('所选目录里没有 .txt/.md 文件（PDF请先转成文本再导）');
+      } else {
+        const { dir = '' } = parsed;
+        if (!dir.trim() || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error('目录不存在，请填本机文件夹完整路径');
+        files = fs.readdirSync(dir).filter((f) => /\.(txt|md)$/i.test(f)).slice(0, 50)
+          .map((f) => ({ name: f, text: fs.readFileSync(path.join(dir, f), 'utf-8') }));
+        if (!files.length) throw new Error('目录里没有 .txt/.md 文件（PDF请先转成文本再导）');
+      }
+      const total = files.reduce((a, f) => a + f.text.length, 0);
       if (total > 5 * 1024 * 1024) throw new Error('文件合计超5MB，先拆小再导');
       const chunks = [];
-      for (const { name, text } of texts) {
+      for (const { name, text } of files) {
         for (let s = 0, k = 0; s < text.length; s += 400, k++) {
           const part = text.slice(s, s + 500).trim();
           if (part.length < 50) continue;
@@ -267,7 +274,10 @@ const server = http.createServer(async (req, res) => {
         }
       }
       const crypto = require('crypto');
-      const id = 'custom_' + crypto.createHash('md5').update(dir).digest('hex').slice(0, 8);
+      const idSeed = url.pathname === '/api/import_texts'
+        ? files.map((f) => f.name + ':' + f.text.length).join('|')
+        : parsed.dir;
+      const id = 'custom_' + crypto.createHash('md5').update(idSeed).digest('hex').slice(0, 8);
       const chunksFile = `chunks_${id}.json`, vecFile = `emb_${id}.json`;
       fs.writeFileSync(path.join(ROOT, chunksFile), JSON.stringify(chunks));
       const ex = await getExtractor('Xenova/bge-small-zh-v1.5');
@@ -277,7 +287,9 @@ const server = http.createServer(async (req, res) => {
         vecs.push(Array.from(o.data));
       }
       fs.writeFileSync(path.join(ROOT, vecFile), JSON.stringify(vecs));
-      const name = '自建池·' + path.basename(dir);
+      const name = url.pathname === '/api/import_texts'
+        ? '自建池·页面勾选(' + files.length + '个文件)'
+        : '自建池·' + path.basename(parsed.dir);
       POOLS[id] = {
         name, lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
         chunkRule: `本地目录导入（${files.length}个文件，500字滑窗100重叠），共${chunks.length}块`,

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG最小演示 · 中文百科256块（纯静态，向量在浏览器里算）</title>
+<style>
+  body { font-family: sans-serif; max-width: 860px; margin: 0 auto; padding: 16px; background: #fff; color: #222; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  th { background: #f2f2f2; }
+  #log { color: #666; font-size: 13px; }
+  input[type=text] { width: 70%; }
+</style>
+</head>
+<body>
+<h2>RAG最小演示（trial·中文百科256块）</h2>
+<p style="font-size:13px;color:#666">纯静态页面：首次查询需下载约100MB中文向量模型到浏览器缓存（一次），之后断网也能玩。数据与向量均为预计算，随页面下发。</p>
+<p>问题：<input type="text" id="q" value="生命数耗完即算为什么？" placeholder="先输入问题">
+TopK <input type="range" id="topK" min="1" max="10" value="5" style="width:120px"> <b id="topKv">5</b>
+alpha <input type="range" id="alpha" min="0" max="1" step="0.1" value="0.7" style="width:120px"> <b id="alphaV">0.7</b>
+<button id="run">运行检索</button> <span id="log"></span></p>
+<table><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>片段</th></tr></thead><tbody id="res"></tbody></table>
+
+<script type="module">
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
+const $ = (id) => document.getElementById(id);
+$('topK').oninput = (e) => $('topKv').textContent = e.target.value;
+$('alpha').oninput = (e) => $('alphaV').textContent = e.target.value;
+let chunks = null, vecs = null, ex = null;
+
+function tokenize(s) {
+  s = s.replace(/\s+/g, '');
+  const set = new Set();
+  for (let i = 0; i < s.length; i++) set.add(s[i]);
+  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+  return set;
+}
+function kwScore(qt, context) {
+  const ctx = tokenize(context);
+  let hit = 0;
+  for (const t of qt) if (ctx.has(t)) hit += t.length > 1 ? 2 : 1;
+  return hit / Math.sqrt(context.length);
+}
+function cosSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+$('run').onclick = async () => {
+  const query = $('q').value.trim();
+  if (!query) { $('log').textContent = '请先输入问题'; return; }
+  try {
+    if (!chunks) {
+      $('log').textContent = '加载数据中…';
+      chunks = await (await fetch('./data/chunks.json')).json();
+      vecs = await (await fetch('./data/embeddings.json')).json();
+    }
+    if (!ex) {
+      $('log').textContent = '首次下载向量模型（约100MB，一次）…';
+      ex = await pipeline('feature-extraction', 'Xenova/bge-small-zh-v1.5');
+    }
+    $('log').textContent = '检索中…';
+    const t0 = Date.now();
+    const qv = Array.from((await ex(query, { pooling: 'mean', normalize: true })).data);
+    const qt = tokenize(query);
+    const ks = chunks.map((c) => kwScore(qt, c.context));
+    const vs = chunks.map((v, i) => cosSim(qv, vecs[i]));
+    const norm = (arr) => { const mn = Math.min(...arr), mx = Math.max(...arr); return arr.map((v) => (mx === mn ? 0 : (v - mn) / (mx - mn))); };
+    const nk = norm(ks), nv = norm(vs);
+    const alpha = +$('alpha').value, k = +$('topK').value;
+    const top = chunks.map((c, i) => ({ t: c.title.split('#')[0], s: alpha * nv[i] + (1 - alpha) * nk[i], snippet: c.context.slice(0, 100) }))
+      .sort((a, b) => b.s - a.s).slice(0, k);
+    document.querySelector('#res tbody').innerHTML = top.map((h, i) =>
+      `<tr><td>Top${i + 1}</td><td>《${h.t}》</td><td>${h.s.toFixed(3)}</td><td>${h.snippet}…</td></tr>`).join('');
+    $('log').textContent = `256块，${Date.now() - t0}ms（向量在浏览器里算的）`;
+  } catch (e) { $('log').textContent = '出错：' + e.message; }
+};
+</script>
+</body>
+</html>

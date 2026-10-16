@@ -26,7 +26,7 @@
 <div class="panel">
   <div id="tip"></div>
   <p><label>库：</label><select id="pool"></select> <span class="qp" data-k="pool">?</span></p>
-  <p><label>本地导入：</label><input type="text" id="importDir" value="" placeholder="本机文件夹完整路径，如 D:\docs" style="width:300px"> <button id="importBtn">导入建池</button> <span class="qp" data-k="import">?</span><br><span id="importLog" style="font-size:13px;color:#666"></span></p>
+  <p><label>本地导入：</label><input type="file" id="importDir" webkitdirectory multiple> <button id="importBtn">导入建池</button> <span class="qp" data-k="import">?</span><br><span id="importLog" style="font-size:13px;color:#666"></span></p>
   <p id="methodRow" style="display:none"><label>切分方法：</label><span class="qp" data-k="method">?</span><br><span id="methodList"></span><br><span id="methodHint" style="font-size:13px;color:#666"></span></p>
   <p><button id="apply">应用切分</button> <span id="applyLog">尚未应用，请先选库和方法后点应用</span><br><span style="font-size:13px;color:#666">注：茅台池首次应用某切法需现切现算（约1–3分钟，请等“已应用”出现），之后秒就绪；trial池全预切，秒就绪。</span></p>
 </div>
@@ -57,7 +57,7 @@
 const $ = (id) => document.getElementById(id);
 const TIPS = {
   pool: '库：切好的池子。切分是建库时定的，运行时改不了，只能切换已切好的库。好比菜只能从备好的菜里选，不能进厨房重切。trial=中文百科256块，moutai=茅台年报2012块，tatqa=英文财报1634块。自建池从下面“本地导入”来。',
-  import: '本地导入：在本机选个文件夹（txt/md文件），系统读进去按500字切块、算向量，建成一个自建池。限制50个文件、合计5MB。PDF要先转成文本再导。',
+  import: '本地导入：点“选择文件”选本机文件夹，页面读出txt/md内容上传，系统按500字切块、算向量，建成一个自建池。限制50个文件、合计5MB。PDF要先转成文本再导。',
   method: '切分方法（仅trial库可选，共6种）：固定500字=按固定字数切，好比豆腐刀，快但可能从句中切断；按自然段=按作者原有段落切；递归切分=按段落→句子→分号逐级切；标点语义边界=按句号断句，块长300–600字；按文档结构=标题与段落组合，每块带标题；父子块=200字小块检索，命中返回所属整段。',
   q: '空问题会被拦截，不出结果。口语化提问考向量，原词原文考关键词。',
   topK: 'TopK=返回前K个最相关的块，好比给模型看K页纸。K小易漏，K大又贵又吵，常用5（实测1→5从61%涨到78%，5→10只到81%）。−/+每次调1格。',
@@ -193,10 +193,13 @@ $('exportCsv').onclick = async () => {
   a.click();
 };
 $('importBtn').onclick = async () => {
-  const dir = $('importDir').value.trim();
-  if (!dir) { $('importLog').textContent = '请先填本机文件夹完整路径'; return; }
-  $('importLog').textContent = '导入中（读文件→切块→向量化，稍等）…';
-  const r = await fetch('/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) });
+  // 目录选择器：浏览器读出txt/md内容POST给服务端（不再手输路径）
+  const picked = [...$('importDir').files].filter((f) => /\.(txt|md)$/i.test(f.name)).slice(0, 50);
+  if (!picked.length) { $('importLog').textContent = '请先点“选择文件”选个文件夹，里面要有 .txt/.md'; return; }
+  $('importLog').textContent = `读到${picked.length}个文件，上传切块中…`;
+  const files = [];
+  for (const f of picked) files.push({ name: f.webkitRelativePath || f.name, text: await f.text() });
+  const r = await fetch('/api/import_texts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ files }) });
   const res = await r.json();
   if (!r.ok) { $('importLog').textContent = res.error || '出错'; return; }
   $('importLog').textContent = `导入成功：${res.name}，${res.files}个文件→${res.chunks}块，已出现在库下拉中，去①区选它点应用`;
