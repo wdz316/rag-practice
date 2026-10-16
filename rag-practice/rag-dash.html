@@ -50,7 +50,7 @@
   <div style="font-size:13px;color:#666">图一：Top1混合分走势（左新右旧）</div>
   <canvas id="hist2" height="80"></canvas>
   <div style="font-size:13px;color:#666">图二：本轮token走势（左新右旧）</div>
-  <table id="runs"><thead><tr><th>时间</th><th>库/切分方法</th><th>问题</th><th>TopK</th><th>alpha</th><th>Top1</th><th>Top1分</th><th>token</th><th>耗时</th></tr></thead><tbody></tbody></table>
+  <table id="runs"><thead><tr><th>时间</th><th>库/切分方法</th><th>问题</th><th>TopK</th><th>alpha</th><th>Top1</th><th>Top1原始分</th><th>token</th><th>耗时</th></tr></thead><tbody></tbody></table>
 </div>
 
 <script>
@@ -153,10 +153,11 @@ async function loadHist() {
   const rows = await (await fetch('/api/runs')).json();
   const last = rows.slice(-20);
   const rev = [...last].reverse(); // 最新在上
+  const raw = (h) => (h.top1sv !== undefined ? h.top1sv : h.top1s); // 老行无top1sv，回退混合分
   document.querySelector('#runs tbody').innerHTML = rev.map((h, i) => {
     let cls = 'flat';
-    if (i < rev.length - 1) { const d = +(h.top1s - rev[i + 1].top1s).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
-    return `<tr><td>${(h.time || '').slice(5, 16).replace('T', ' ')}</td><td>${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''}</td><td>${(h.q || '').slice(0, 10)}</td><td>${h.topK}</td><td>${h.alpha}</td><td>《${(h.top1 || '').slice(0, 12)}》</td><td class="${cls}">${h.top1s}</td><td>${h.tokens || ''}</td><td>${h.ms}ms</td></tr>`;
+    if (i < rev.length - 1) { const d = +(raw(h) - raw(rev[i + 1])).toFixed(3); cls = Math.abs(d) < 0.02 ? 'flat' : (d > 0 ? 'up' : 'down'); }
+    return `<tr><td>${(h.time || '').slice(5, 16).replace('T', ' ')}</td><td>${h.pool || ''}${h.method && h.method !== '-' ? '/' + h.method : ''}</td><td>${(h.q || '').slice(0, 10)}</td><td>${h.topK}</td><td>${h.alpha}</td><td>《${(h.top1 || '').slice(0, 12)}》</td><td class="${cls}">${raw(h)}</td><td>${h.tokens || ''}</td><td>${h.ms}ms</td></tr>`;
   }).join('');
   const tipCb = {
     plugins: {
@@ -168,8 +169,8 @@ async function loadHist() {
   if (chart2) chart2.destroy();
   chart2 = new Chart(document.getElementById('hist1'), {
     type: 'line',
-    data: { labels: rev.map((_, i) => i + 1), datasets: [{ data: rev.map((h) => h.top1s) }] },
-    options: { ...tipCb, scales: { ...tipCb.scales, y: { title: { display: true, text: 'Top1混合分（越高越好）' } } } },
+    data: { labels: rev.map((_, i) => i + 1), datasets: [{ data: rev.map((h) => (h.top1sv !== undefined ? h.top1sv : h.top1s)) }] },
+    options: { ...tipCb, scales: { ...tipCb.scales, y: { title: { display: true, text: 'Top1原始向量分（越高越好，非归一）' } } } },
   });
   if (chart3) chart3.destroy();
   chart3 = new Chart(document.getElementById('hist2'), {
@@ -184,8 +185,8 @@ $('clearHist').onclick = async () => {
 };
 $('exportCsv').onclick = async () => {
   const rows = await (await fetch('/api/runs')).json();
-  const head = 'time,pool,method,q,topK,alpha,top1,top1s,tokens,ms';
-  const csv = [head, ...rows.map((h) => [h.time, h.pool, h.method || '', `"${(h.q || '').replace(/"/g, '""')}"`, h.topK, h.alpha, `"${(h.top1 || '').replace(/"/g, '""')}"`, h.top1s, h.tokens || '', h.ms].join(','))].join('\n');
+  const head = 'time,pool,method,q,topK,alpha,top1,top1mix,top1raw,tokens,ms';
+  const csv = [head, ...rows.map((h) => [h.time, h.pool, h.method || '', `"${(h.q || '').replace(/"/g, '""')}"`, h.topK, h.alpha, `"${(h.top1 || '').replace(/"/g, '""')}"`, h.top1s, h.top1sv !== undefined ? h.top1sv : '', h.tokens || '', h.ms].join(','))].join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   a.download = 'rag_runs.csv';

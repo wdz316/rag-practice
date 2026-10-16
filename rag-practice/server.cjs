@@ -209,8 +209,11 @@ const server = http.createServer(async (req, res) => {
           ? { title: P.parents[c.parent].title, context: P.parents[c.parent].context, via: c._id }
           : { title: c.title, context: c.context, via: null };
         const chars = shown.context.length;
+        // 标题后缀块ID：同名块（如茅台年报#MP3）靠它区分，否则Top1列全一个样
+        const tag = c._id && c._id.includes('#') ? '#' + c._id.split('#').pop() : '';
+        const fullTitle = shown.title + tag;
         return {
-          title: shown.title.length > 40 ? shown.title.slice(0, 40) + '…' : shown.title,
+          title: fullTitle.length > 40 ? fullTitle.slice(0, 40) + '…' : fullTitle,
           score: +(alpha * nv[i] + (1 - alpha) * nk[i]).toFixed(4),
           sv: +vs[i].toFixed(4), sk: +ks[i].toFixed(4),
           chars, tokens: estTokens(shown.context, P.lang),
@@ -220,7 +223,8 @@ const server = http.createServer(async (req, res) => {
       }).sort((a, b) => b.score - a.score).slice(0, k);
       const totalTokens = top.reduce((a, h) => a + h.tokens, 0);
       const ms = Date.now() - t0;
-      const rec = { time: new Date().toISOString(), pool, method: POOLS[pool].methods ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, ms, tokens: totalTokens };
+      // top1sv记原始向量分：混合分是归一化逼出来的，第一名恒为1.0，无信息量
+      const rec = { time: new Date().toISOString(), pool, method: POOLS[pool].methods ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, top1sv: top[0].sv, ms, tokens: totalTokens };
       fs.appendFileSync(HIST, JSON.stringify(rec) + '\n'); // 每次查询自动落表
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: pool === 'trial' ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top }));
