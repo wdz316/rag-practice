@@ -77,6 +77,7 @@ const POOLS = {
   },
 };
 const cache = {};
+const jobs = {}; // 后台现切任务：id -> {status, done, total, pool, method, error, result}
 // 自定义池注册表（本地目录导入，持久化，重启不丢）
 const REG = path.join(ROOT, 'custom_pools.json');
 function loadRegistry() {
@@ -155,7 +156,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/apply') {
-      // 应用切分：向量就绪直接返回；缺失则现切现算（只发生在用户点了应用之后，不预切）
+      // 应用切分：向量就绪直接返回；缺失则起后台任务现切现算，前端轮询/api/job看进度条
       let body = '';
       for await (const ch of req) body += ch;
       const { pool = 'trial', method = 'para' } = JSON.parse(body || '{}');
@@ -164,16 +165,51 @@ const server = http.createServer(async (req, res) => {
         (!fs.existsSync(path.join(PDFD, `chunks_moutai_${method}.json`)) ||
          !fs.existsSync(path.join(PDFD, `emb_moutai_${method}.json`)));
       if (needBuild) {
-        const { execFile } = require('child_process');
-        await new Promise((resolve, reject) => {
-          execFile(process.execPath, ['methods_moutai.cjs', method], { cwd: PDFD, timeout: 20 * 60 * 1000 },
-            (err, stdout, stderr) => err ? reject(new Error('现切失败：' + (stderr || err.message).slice(0, 200))) : resolve(stdout));
+        const id = 'job_' + Date.now().toString(36);
+        jobs[id] = { status: 'running', done: 0, total: 0, pool, method, error: null };
+        const { spawn } = require('child_process');
+        const child = spawn(process.execPath, ['methods_moutai.cjs', method], { cwd: PDFD });
+        let buf = '';
+        child.stdout.on('data', (d) => {
+          buf += d.toString();
+          // 进度行如 "  recur 300/703 ..." 或首行 "recur: 703块"
+          let m = buf.match(/(\d+)\/(\d+)\s*(已用|，|$)/) || buf.match(/(\d+)\/(\d+)/);
+          const total = buf.match(/(\d+)块，已有\d*/);
+          const j = jobs[id];
+          if (!j) return;
+          if (total) j.total = +total[1];
+          if (m) { j.done = +m[1]; if (!j.total) j.total = +m[2]; }
+          buf = buf.slice(-200);
         });
+        child.on('error', (e) => { if (jobs[id]) { jobs[id].status = 'error'; jobs[id].error = e.message; } });
+        child.on('close', (code) => {
+          const j = jobs[id];
+          if (!j) return;
+          if (code !== 0) { j.status = 'error'; j.error = '现切进程退出码' + code; return; }
+          try {
+            delete cache[pool + ':' + method];
+            const P = getPool(pool, method);
+            const avg = Math.round(P.chunks.reduce((a, c) => a + c.context.length, 0) / P.chunks.length);
+            j.status = 'done'; j.done = j.total || P.chunks.length; j.total = P.chunks.length;
+            j.result = { ok: true, pool, method, chunks: P.chunks.length, avgChars: avg };
+          } catch (e) { j.status = 'error'; j.error = e.message; }
+        });
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ job: id }));
+        return;
       }
       const P = getPool(pool, POOLS[pool].methods ? method : undefined);
       const avg = Math.round(P.chunks.reduce((a, c) => a + c.context.length, 0) / P.chunks.length);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, pool, method: POOLS[pool].methods ? method : '-', chunks: P.chunks.length, avgChars: avg }));
+      return;
+    }
+    if (url.pathname === '/api/job' && req.method === 'GET') {
+      const id = url.searchParams.get('id') || '';
+      const j = jobs[id];
+      if (!j) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: '任务不存在' })); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(j));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/search') {
@@ -227,7 +263,7 @@ const server = http.createServer(async (req, res) => {
       const rec = { time: new Date().toISOString(), pool, method: POOLS[pool].methods ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, top1sv: top[0].sv, ms, tokens: totalTokens };
       fs.appendFileSync(HIST, JSON.stringify(rec) + '\n'); // 每次查询自动落表
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: pool === 'trial' ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top }));
+      res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: POOLS[pool].methods ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top }));
       return;
     }
     if (url.pathname === '/api/runs' && req.method === 'GET') {
