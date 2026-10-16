@@ -28,7 +28,7 @@
   <p><label>库：</label><select id="pool"></select> <span class="qp" data-k="pool">?</span></p>
   <p><label>本地导入：</label><input type="file" id="importDir" webkitdirectory multiple> <button id="importBtn">导入建池</button> <span class="qp" data-k="import">?</span><br><span id="importLog" style="font-size:13px;color:#666"></span></p>
   <p id="methodRow" style="display:none"><label>切分方法：</label><span class="qp" data-k="method">?</span><br><span id="methodList"></span><br><span id="methodHint" style="font-size:13px;color:#666"></span></p>
-  <p><button id="apply">应用切分</button> <span id="applyLog">尚未应用，请先选库和方法后点应用</span><br><span style="font-size:13px;color:#666">注：茅台池首次应用某切法需现切现算（约1–3分钟，请等“已应用”出现），之后秒就绪；trial池全预切，秒就绪。</span></p>
+  <p><button id="apply">应用切分</button> <span id="applyLog">尚未应用，请先选库和方法后点应用</span><br><progress id="jobBar" value="0" max="100" style="width:300px;display:none"></progress> <span id="jobTxt" style="font-size:13px;color:#666"></span><br><span style="font-size:13px;color:#666">注：茅台池首次应用某切法需现切现算（约1–3分钟，看进度条），之后秒就绪；trial池全预切，秒就绪。</span></p>
 </div>
 
 <h2>② 检索检测（应用后查询）</h2>
@@ -40,6 +40,7 @@
   <p><button id="run">运行检索（自动记入对比表）</button> <span id="log"></span></p>
   <div id="sum" style="font-size:13px;color:#666"></div>
   <div id="warn" style="font-size:14px;color:red;font-weight:bold"></div>
+  <div id="answer" style="border:1px dashed #888;padding:8px;margin:8px 0;font-size:14px"></div>
   <table id="res"><thead><tr><th>排名</th><th>标题</th><th>混合分</th><th>向量分</th><th>关键词分</th><th>字数/token(预估)</th><th>片段</th></tr></thead><tbody></tbody></table>
 </div>
 
@@ -119,13 +120,37 @@ fetch('/api/pools').then((r) => r.json()).then((pools) => {
 
 $('apply').onclick = async () => {
   $('applyLog').textContent = '应用中…';
+  $('jobBar').style.display = 'none';
+  $('jobTxt').textContent = '';
   const body = { pool: $('pool').value };
   if (curMethod()) body.method = curMethod();
+  const finishApply = (res) => {
+    applied = { pool: body.pool, method: res.method };
+    $('applyLog').innerHTML = `<span class="ok">已应用：${res.method && res.method !== '-' ? '切分方法' + res.method + '，' : ''}共${res.chunks}块，平均${res.avgChars}字，可查询</span>`;
+    $('jobBar').style.display = 'none';
+    $('jobTxt').textContent = '';
+  };
   const r = await fetch('/api/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const res = await r.json();
+  if (!r.ok && r.status !== 202) { $('applyLog').textContent = res.error || '出错'; return; }
+  if (res.job) {
+    // 后台现切：轮询进度条
+    $('jobBar').style.display = '';
+    const poll = async () => {
+      const j = await (await fetch('/api/job?id=' + res.job)).json();
+      if (j.total > 0) {
+        $('jobBar').value = Math.round((100 * j.done) / j.total);
+        $('jobTxt').textContent = `现切现算中 ${j.done}/${j.total}块…`;
+      } else $('jobTxt').textContent = '现切现算启动中…';
+      if (j.status === 'done') { finishApply(j.result); return; }
+      if (j.status === 'error') { $('applyLog').textContent = '现切失败：' + (j.error || '未知'); $('jobBar').style.display = 'none'; $('jobTxt').textContent = ''; return; }
+      setTimeout(poll, 2000);
+    };
+    poll();
+    return;
+  }
   if (!r.ok) { $('applyLog').textContent = res.error || '出错'; return; }
-  applied = { pool: body.pool, method: res.method };
-  $('applyLog').innerHTML = `<span class="ok">已应用：${res.method && res.method !== '-' ? '切分方法' + res.method + '，' : ''}共${res.chunks}块，平均${res.avgChars}字，可查询</span>`;
+  finishApply(res);
 };
 
 $('run').onclick = async () => {
@@ -144,6 +169,15 @@ $('run').onclick = async () => {
   $('warn').textContent = raw < 0.55
     ? `⚠ Top1绝对相似度仅${raw}（低于0.55置信线）：很可能题库不对——比如拿茅台题考百科库。建议切换库或换问法，不要信这份答案。`
     : '';
+  // 最终回答区：有时间错位先报时间错位；有依据给引用+出处，无依据给标准拒答（模板抽取，非大模型生成）
+  const t0 = res.top[0];
+  if (res.timeWarn) {
+    $('answer').innerHTML = `【最终回答】<b>无法回答</b>：${res.timeWarn}`;
+  } else if (raw >= 0.55) {
+    $('answer').innerHTML = `【最终回答】（参考回答，照原文抽取，非大模型生成）<br>“${t0.snippet}…”<br>出处：${t0.source || t0.title}｜Top${res.topK}共${res.totalTokens}token`;
+  } else {
+    $('answer').innerHTML = `【最终回答】<b>知识库无匹配依据，不予回答</b>（Top1绝对分${raw}，低于0.55置信线）。建议：换问法 / 切换库 / 转人工。`;
+  }
   document.querySelector('#res tbody').innerHTML = res.top.map((h, i) =>
     `<tr><td>Top${i + 1}</td><td>《${h.title}》${h.via ? '（由子块 ' + h.via.split('#')[1] + ' 命中返父）' : ''}</td><td>${h.score}</td><td>${h.sv}</td><td>${h.sk}</td><td>${h.chars}字/${h.tokens}</td><td>${h.snippet}…</td></tr>`).join('');
   loadHist();

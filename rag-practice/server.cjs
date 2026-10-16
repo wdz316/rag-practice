@@ -27,10 +27,11 @@ const POOLS = {
   trial: {
     name: 'trial·中文百科', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
     chunkRule: '6切分方法可切（见切分方法下拉），基线256块',
+    years: null, // 百科无年份概念，不做时间校验
     methods: true,
     load(method = 'para') {
       const chunks = JSON.parse(fs.readFileSync(path.join(ROOT, `chunks_trial_${method}.json`), 'utf-8'))
-        .map((c) => ({ title: c.title.split('#')[0], context: c.context, _id: c.title, parent: c.parent }));
+        .map((c) => ({ title: c.title.split('#')[0], context: c.context, _id: c.title, parent: c.parent, source: 'CMRC trial·' + c.title.split('#')[0] }));
       let parents = null;
       if (method === 'child') parents = JSON.parse(fs.readFileSync(path.join(ROOT, 'parents_trial_child.json'), 'utf-8'));
       return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(ROOT, `emb_trial_${method}.json`), 'utf-8')), parents };
@@ -39,25 +40,26 @@ const POOLS = {
   moutai: {
     name: 'moutai·茅台年报', lang: 'zh', model: 'Xenova/bge-small-zh-v1.5',
     chunkRule: '7切分方法可切（正文）+ 269张表共享（行拆旧池保留为tablerow）',
+    years: [2022, 2023, 2024], // 2024年报：只有2022–2024全年数，无2025全年数
     methods: { ...METHODS, tablerow: '行拆旧池：表>10行按行拆+首行贴头+文500滑窗（保留对照，不用现切）' },
     load(method = 'tablerow') {
       if (method === 'tablerow') {
         // 旧池原样保留：行拆+滑窗，不用现切
         const chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks_v2.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
           const c = JSON.parse(l);
-          return { title: c.chunk_id, context: c.text };
+          return { title: c.chunk_id, context: c.text, source: c.source };
         });
         return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings_v2.json'), 'utf-8')) };
       }
       // 6新法：正文现切 + 269张整表共享（从v1切片，零重算）
       const texts = JSON.parse(fs.readFileSync(path.join(PDFD, `chunks_moutai_${method}.json`), 'utf-8'))
-        .map((c) => ({ title: '茅台年报', context: c.context, _id: c.title, parent: c.parent }));
+        .map((c) => ({ title: '茅台年报', context: c.context, _id: c.title, parent: c.parent, source: '茅台2024年报正文·' + c.title }));
       const tvecs = JSON.parse(fs.readFileSync(path.join(PDFD, `emb_moutai_${method}.json`), 'utf-8'));
       const v1chunks = fs.readFileSync(path.join(PDFD, 'moutai_chunks.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
       const v1vecs = JSON.parse(fs.readFileSync(path.join(PDFD, 'moutai_embeddings.json'), 'utf-8'));
       const tables = [], tvec = [];
       v1chunks.forEach((c, i) => {
-        if (c.chunk_type === 'table') { tables.push({ title: c.chunk_id, context: c.text }); tvec.push(v1vecs[i]); }
+        if (c.chunk_type === 'table') { tables.push({ title: c.chunk_id, context: c.text, source: c.source }); tvec.push(v1vecs[i]); }
       });
       let parents = null;
       if (method === 'child') parents = JSON.parse(fs.readFileSync(path.join(PDFD, 'parents_moutai_child.json'), 'utf-8'));
@@ -67,10 +69,11 @@ const POOLS = {
   tatqa: {
     name: 'tatqa1634·英文财报表文', lang: 'en', model: 'Xenova/bge-small-en-v1.5',
     chunkRule: '表整存转markdown，段落原生，共1634块（dev）',
+    years: null, // 财报年份杂，不做时间校验
     load() {
       const chunks = fs.readFileSync(path.join(ROOT, 'tatqa', 'tatqa_dev_chunks.jsonl'), 'utf-8').split('\n').filter(Boolean).map((l) => {
         const c = JSON.parse(l);
-        return { title: c.chunk_id, context: c.text };
+        return { title: c.chunk_id, context: c.text, source: c.source };
       });
       return { chunks, vecs: JSON.parse(fs.readFileSync(path.join(ROOT, 'tatqa', 'tatqa_dev_embeddings.json'), 'utf-8')) };
     },
@@ -261,15 +264,24 @@ const server = http.createServer(async (req, res) => {
           chars, tokens: estTokens(shown.context, P.lang),
           snippet: shown.context.slice(0, 120),
           via: shown.via,
+          source: c.source || shown.title,
         };
       }).sort((a, b) => b.score - a.score).slice(0, k);
       const totalTokens = top.reduce((a, h) => a + h.tokens, 0);
       const ms = Date.now() - t0;
+      // 时间错位拦截：问题年份超出本池覆盖（如拿2025问2024年报库）
+      let timeWarn = null;
+      if (P.years) {
+        const m = query.match(/(19|20)\d{2}/);
+        if (m && !P.years.includes(+m[0])) {
+          timeWarn = `问题问的是${m[0]}年，但本库只覆盖${P.years.join('、')}年数据（如2024年报无2025全年数）。以下结果仅供参考，不要当${m[0]}年答案。`;
+        }
+      }
       // top1sv记原始向量分：混合分是归一化逼出来的，第一名恒为1.0，无信息量
       const rec = { time: new Date().toISOString(), pool, method: POOLS[pool].methods ? method : '-', q: query.slice(0, 30), topK: k, alpha, metric, top1: top[0].title.slice(0, 20), top1s: top[0].score, top1sv: top[0].sv, ms, tokens: totalTokens };
       fs.appendFileSync(HIST, JSON.stringify(rec) + '\n'); // 每次查询自动落表
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: POOLS[pool].methods ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top }));
+      res.end(JSON.stringify({ query, topK: k, alpha, metric, pool, method: POOLS[pool].methods ? method : '-', poolName: P.name, ms, poolSize: P.chunks.length, totalTokens, top, timeWarn }));
       return;
     }
     if (url.pathname === '/api/runs' && req.method === 'GET') {
